@@ -1,0 +1,88 @@
+# Archives and Linux binaries
+*.zip
+*.linux
+
+# Compiled binaries / build outputs
+*.o
+*.so
+*.so.*
+*.a
+*.dll
+*.exe
+*.dylib
+
+# Demo binaries (no extension, Linux executables)
+00-loop
+00-script
+01-demo2d
+01-easing
+01-font
+01-ui
+02-ddraw
+02-frustum
+03-anims
+03-batching
+03-mesh
+04-actor
+06-material
+06-parallax
+06-scene-sorting
+06-scene
+06-sorting
+07-netsync
+07-network
+08-audio
+08-video
+09-cubemap
+09-envmap
+09-lights
+09-shadertoy
+09-shadows-scene
+09-shadows
+99-bt
+99-compute
+99-controller
+99-geom
+99-gizmo
+99-gui
+99-lod
+99-pathfind
+99-spine
+99-splines
+99-sponza
+99-sprite
+99-sprite3d
+99-steam
+hello
+editor
+
+# libengine
+libengine.so
+libengine.dll
+engine.o
+
+# Windows build artifacts
+*.pdb
+*.ilk
+*.exp
+*.lib
+*.obj
+
+# macOS
+.DS_Store
+
+# Editor / IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Lua binaries in demos
+demos/lua/luajit.linux
+demos/lua/luajit.osx
+demos/lua/luajit.exe
+
+# Temp / logs
+*.log
+*.tmp
