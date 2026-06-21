@@ -1,2 +1,5 @@
-# Blender 4.2.1 LTS MTL File: 'None'
-# www.blender.org
+newmtl Material
+Ka 0.200000 0.200000 0.200000
+Kd 0.800000 0.800000 0.800000
+Ks 0.500000 0.500000 0.500000
+Ns 50.000000
