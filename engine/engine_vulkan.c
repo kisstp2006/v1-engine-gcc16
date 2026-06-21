@@ -33,6 +33,7 @@ extern int    glfwInit(void);
 extern void   glfwPollEvents(void);
 extern int    glfwWindowShouldClose(GLFWwindow* window);
 extern void   glfwWindowHint(int hint, int value);
+extern void   glfwGetFramebufferSize(GLFWwindow* window, int* width, int* height);
 extern GLFWwindow* glfwCreateWindow(int w, int h, const char* title,
                                     GLFWmonitor* monitor, GLFWwindow* share);
 extern int    glfwVulkanSupported(void);
@@ -196,6 +197,22 @@ static VkShaderModule create_shader_module(const uint32_t *code, size_t size) {
     return mod;
 }
 
+static uint32_t clamp_u32(uint32_t v, uint32_t lo, uint32_t hi) {
+    return v < lo ? lo : (v > hi ? hi : v);
+}
+
+static bool update_framebuffer_size(void) {
+    int width = vk.width;
+    int height = vk.height;
+    if (vk.window)
+        glfwGetFramebufferSize(vk.window, &width, &height);
+    if (width <= 0 || height <= 0)
+        return false;
+    vk.width = width;
+    vk.height = height;
+    return true;
+}
+
 /* ── Instance creation ───────────────────────────────────────────────────── */
 
 static bool create_instance(void) {
@@ -245,49 +262,132 @@ static bool create_instance(void) {
 
 /* ── Physical device + queue family selection ────────────────────────────── */
 
+static const char *required_device_extensions[] = {
+    VK_KHR_SWAPCHAIN_EXTENSION_NAME
+};
+static const uint32_t required_device_extension_count =
+    sizeof(required_device_extensions) / sizeof(required_device_extensions[0]);
+
+static bool find_queue_families_for_device(VkPhysicalDevice device,
+                                           uint32_t *graphics_family,
+                                           uint32_t *present_family) {
+    uint32_t count = 0;
+    vkGetPhysicalDeviceQueueFamilyProperties(device, &count, NULL);
+    if (count == 0) return false;
+
+    VkQueueFamilyProperties *families = malloc(count * sizeof(VkQueueFamilyProperties));
+    if (!families) return false;
+    vkGetPhysicalDeviceQueueFamilyProperties(device, &count, families);
+
+    *graphics_family = UINT32_MAX;
+    *present_family = UINT32_MAX;
+    for (uint32_t i = 0; i < count; i++) {
+        if (*graphics_family == UINT32_MAX &&
+            families[i].queueCount > 0 && (families[i].queueFlags & VK_QUEUE_GRAPHICS_BIT))
+            *graphics_family = i;
+        VkBool32 present = VK_FALSE;
+        vkGetPhysicalDeviceSurfaceSupportKHR(device, i, vk.surface, &present);
+        if (*present_family == UINT32_MAX && families[i].queueCount > 0 && present)
+            *present_family = i;
+        if (*graphics_family != UINT32_MAX && *present_family != UINT32_MAX) break;
+    }
+    free(families);
+    return *graphics_family != UINT32_MAX && *present_family != UINT32_MAX;
+}
+
+static bool device_supports_required_extensions(VkPhysicalDevice device) {
+    uint32_t ext_count = 0;
+    vkEnumerateDeviceExtensionProperties(device, NULL, &ext_count, NULL);
+    if (ext_count == 0) return false;
+
+    VkExtensionProperties *extensions = malloc(ext_count * sizeof(VkExtensionProperties));
+    if (!extensions) return false;
+    vkEnumerateDeviceExtensionProperties(device, NULL, &ext_count, extensions);
+
+    bool all_found = true;
+    for (uint32_t req = 0; req < required_device_extension_count; req++) {
+        bool found = false;
+        for (uint32_t i = 0; i < ext_count; i++) {
+            if (strcmp(required_device_extensions[req], extensions[i].extensionName) == 0) {
+                found = true;
+                break;
+            }
+        }
+        if (!found) {
+            all_found = false;
+            break;
+        }
+    }
+    free(extensions);
+    return all_found;
+}
+
+static bool device_has_swapchain_support(VkPhysicalDevice device) {
+    uint32_t format_count = 0;
+    uint32_t present_mode_count = 0;
+    vkGetPhysicalDeviceSurfaceFormatsKHR(device, vk.surface, &format_count, NULL);
+    vkGetPhysicalDeviceSurfacePresentModesKHR(device, vk.surface, &present_mode_count, NULL);
+    return format_count > 0 && present_mode_count > 0;
+}
+
+static int score_physical_device(VkPhysicalDevice device) {
+    VkPhysicalDeviceProperties props;
+    vkGetPhysicalDeviceProperties(device, &props);
+
+    int score = 0;
+    if (props.deviceType == VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU)
+        score += 1000;
+    score += (int)props.limits.maxImageDimension2D;
+    return score;
+}
+
 static bool pick_physical_device(void) {
     uint32_t count = 0;
     vkEnumeratePhysicalDevices(vk.instance, &count, NULL);
     if (count == 0) { fprintf(stderr, "[Vulkan] No Vulkan devices found\n"); return false; }
 
     VkPhysicalDevice *devices = malloc(count * sizeof(VkPhysicalDevice));
+    if (!devices) return false;
     vkEnumeratePhysicalDevices(vk.instance, &count, devices);
 
-    /* Prefer discrete GPU, otherwise use first available */
-    vk.physical_device = devices[0];
+    VkPhysicalDevice best = VK_NULL_HANDLE;
+    uint32_t best_graphics = UINT32_MAX;
+    uint32_t best_present = UINT32_MAX;
+    int best_score = -1;
+
     for (uint32_t i = 0; i < count; i++) {
-        VkPhysicalDeviceProperties props;
-        vkGetPhysicalDeviceProperties(devices[i], &props);
-        if (props.deviceType == VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU) {
-            vk.physical_device = devices[i];
-            break;
+        uint32_t graphics_family = UINT32_MAX;
+        uint32_t present_family = UINT32_MAX;
+
+        bool has_queues = find_queue_families_for_device(devices[i], &graphics_family, &present_family);
+        bool has_extensions = device_supports_required_extensions(devices[i]);
+        bool has_swapchain = has_extensions && device_has_swapchain_support(devices[i]);
+        if (!has_queues || !has_extensions || !has_swapchain)
+            continue;
+
+        int score = score_physical_device(devices[i]);
+        if (score > best_score) {
+            best = devices[i];
+            best_graphics = graphics_family;
+            best_present = present_family;
+            best_score = score;
         }
     }
     free(devices);
 
+    if (best == VK_NULL_HANDLE) {
+        fprintf(stderr, "[Vulkan] No suitable GPU found (needs graphics queue, present queue, swapchain extension, surface format and present mode)\n");
+        return false;
+    }
+
+    vk.physical_device = best;
+    vk.graphics_family = best_graphics;
+    vk.present_family = best_present;
+
     VkPhysicalDeviceProperties props;
     vkGetPhysicalDeviceProperties(vk.physical_device, &props);
-    fprintf(stderr, "[Vulkan] Using GPU: %s\n", props.deviceName);
-    return true;
-}
-
-static bool find_queue_families(void) {
-    uint32_t count = 0;
-    vkGetPhysicalDeviceQueueFamilyProperties(vk.physical_device, &count, NULL);
-    VkQueueFamilyProperties *families = malloc(count * sizeof(VkQueueFamilyProperties));
-    vkGetPhysicalDeviceQueueFamilyProperties(vk.physical_device, &count, families);
-
-    vk.graphics_family = UINT32_MAX;
-    vk.present_family  = UINT32_MAX;
-    for (uint32_t i = 0; i < count; i++) {
-        if (families[i].queueFlags & VK_QUEUE_GRAPHICS_BIT)
-            vk.graphics_family = i;
-        VkBool32 present = VK_FALSE;
-        vkGetPhysicalDeviceSurfaceSupportKHR(vk.physical_device, i, vk.surface, &present);
-        if (present) vk.present_family = i;
-        if (vk.graphics_family != UINT32_MAX && vk.present_family != UINT32_MAX) break;
-    }
-    free(families);
+    fprintf(stderr, "[Vulkan] Using GPU: %s (graphics queue=%u, present queue=%u)\n",
+            props.deviceName, vk.graphics_family, vk.present_family);
     return vk.graphics_family != UINT32_MAX && vk.present_family != UINT32_MAX;
 }
 
@@ -308,15 +408,14 @@ static bool create_device(void) {
         };
     }
 
-    const char *device_extensions[] = { VK_KHR_SWAPCHAIN_EXTENSION_NAME };
     VkPhysicalDeviceFeatures features = {0};
 
     VkDeviceCreateInfo ci = {
         .sType                   = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO,
         .queueCreateInfoCount    = family_count,
         .pQueueCreateInfos       = queue_infos,
-        .enabledExtensionCount   = 1,
-        .ppEnabledExtensionNames = device_extensions,
+        .enabledExtensionCount   = required_device_extension_count,
+        .ppEnabledExtensionNames = required_device_extensions,
         .pEnabledFeatures        = &features,
     };
     VK_CHECK(vkCreateDevice(vk.physical_device, &ci, NULL, &vk.device));
@@ -328,13 +427,23 @@ static bool create_device(void) {
 /* ── Swapchain ───────────────────────────────────────────────────────────── */
 
 static bool create_swapchain(void) {
+    if (!update_framebuffer_size()) {
+        fprintf(stderr, "[Vulkan] Swapchain creation skipped: framebuffer is 0x0\n");
+        return false;
+    }
+
     VkSurfaceCapabilitiesKHR caps;
     vkGetPhysicalDeviceSurfaceCapabilitiesKHR(vk.physical_device, vk.surface, &caps);
 
     /* Format: prefer B8G8R8A8_SRGB + SRGB_NONLINEAR */
     uint32_t fmt_count = 0;
     vkGetPhysicalDeviceSurfaceFormatsKHR(vk.physical_device, vk.surface, &fmt_count, NULL);
+    if (fmt_count == 0) {
+        fprintf(stderr, "[Vulkan] Surface has no formats\n");
+        return false;
+    }
     VkSurfaceFormatKHR *formats = malloc(fmt_count * sizeof(VkSurfaceFormatKHR));
+    if (!formats) return false;
     vkGetPhysicalDeviceSurfaceFormatsKHR(vk.physical_device, vk.surface, &fmt_count, formats);
     VkSurfaceFormatKHR chosen = formats[0];
     for (uint32_t i = 0; i < fmt_count; i++) {
@@ -349,7 +458,12 @@ static bool create_swapchain(void) {
     /* Present mode: prefer mailbox (low-latency), fallback FIFO */
     uint32_t pm_count = 0;
     vkGetPhysicalDeviceSurfacePresentModesKHR(vk.physical_device, vk.surface, &pm_count, NULL);
+    if (pm_count == 0) {
+        fprintf(stderr, "[Vulkan] Surface has no present modes\n");
+        return false;
+    }
     VkPresentModeKHR *modes = malloc(pm_count * sizeof(VkPresentModeKHR));
+    if (!modes) return false;
     vkGetPhysicalDeviceSurfacePresentModesKHR(vk.physical_device, vk.surface, &pm_count, modes);
     VkPresentModeKHR present_mode = VK_PRESENT_MODE_FIFO_KHR;
     for (uint32_t i = 0; i < pm_count; i++)
@@ -360,8 +474,16 @@ static bool create_swapchain(void) {
     if (caps.currentExtent.width != UINT32_MAX) {
         vk.swapchain_extent = caps.currentExtent;
     } else {
-        vk.swapchain_extent.width  = (uint32_t)vk.width;
-        vk.swapchain_extent.height = (uint32_t)vk.height;
+        vk.swapchain_extent.width = clamp_u32((uint32_t)vk.width,
+                                              caps.minImageExtent.width,
+                                              caps.maxImageExtent.width);
+        vk.swapchain_extent.height = clamp_u32((uint32_t)vk.height,
+                                               caps.minImageExtent.height,
+                                               caps.maxImageExtent.height);
+    }
+    if (vk.swapchain_extent.width == 0 || vk.swapchain_extent.height == 0) {
+        fprintf(stderr, "[Vulkan] Swapchain creation skipped: surface extent is 0x0\n");
+        return false;
     }
 
     uint32_t img_count = caps.minImageCount + 1;
@@ -394,11 +516,13 @@ static bool create_swapchain(void) {
     VK_CHECK(vkCreateSwapchainKHR(vk.device, &ci, NULL, &vk.swapchain));
 
     vkGetSwapchainImagesKHR(vk.device, vk.swapchain, &vk.image_count, NULL);
-    vk.images = malloc(vk.image_count * sizeof(VkImage));
+    vk.images = calloc(vk.image_count, sizeof(VkImage));
+    if (!vk.images) return false;
     vkGetSwapchainImagesKHR(vk.device, vk.swapchain, &vk.image_count, vk.images);
 
     /* Image views */
-    vk.image_views = malloc(vk.image_count * sizeof(VkImageView));
+    vk.image_views = calloc(vk.image_count, sizeof(VkImageView));
+    if (!vk.image_views) return false;
     for (uint32_t i = 0; i < vk.image_count; i++) {
         VkImageViewCreateInfo iv = {
             .sType                           = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
@@ -526,7 +650,8 @@ static bool create_clear_pipeline(void) {
 /* ── Framebuffers ────────────────────────────────────────────────────────── */
 
 static bool create_framebuffers(void) {
-    vk.framebuffers = malloc(vk.image_count * sizeof(VkFramebuffer));
+    vk.framebuffers = calloc(vk.image_count, sizeof(VkFramebuffer));
+    if (!vk.framebuffers) return false;
     for (uint32_t i = 0; i < vk.image_count; i++) {
         VkFramebufferCreateInfo ci = {
             .sType           = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO,
@@ -538,6 +663,83 @@ static bool create_framebuffers(void) {
         };
         VK_CHECK(vkCreateFramebuffer(vk.device, &ci, NULL, &vk.framebuffers[i]));
     }
+    return true;
+}
+
+static void destroy_swapchain_resources(void) {
+    if (!vk.device) return;
+
+    if (vk.framebuffers) {
+        for (uint32_t i = 0; i < vk.image_count; i++) {
+            if (vk.framebuffers[i])
+                vkDestroyFramebuffer(vk.device, vk.framebuffers[i], NULL);
+        }
+    }
+    if (vk.clear_pipeline)
+        vkDestroyPipeline(vk.device, vk.clear_pipeline, NULL);
+    if (vk.pipeline_layout)
+        vkDestroyPipelineLayout(vk.device, vk.pipeline_layout, NULL);
+    if (vk.vert_module)
+        vkDestroyShaderModule(vk.device, vk.vert_module, NULL);
+    if (vk.frag_module)
+        vkDestroyShaderModule(vk.device, vk.frag_module, NULL);
+    if (vk.render_pass)
+        vkDestroyRenderPass(vk.device, vk.render_pass, NULL);
+
+    if (vk.image_views) {
+        for (uint32_t i = 0; i < vk.image_count; i++) {
+            if (vk.image_views[i])
+                vkDestroyImageView(vk.device, vk.image_views[i], NULL);
+        }
+    }
+    if (vk.swapchain)
+        vkDestroySwapchainKHR(vk.device, vk.swapchain, NULL);
+
+    free(vk.images);
+    free(vk.image_views);
+    free(vk.framebuffers);
+
+    vk.swapchain = VK_NULL_HANDLE;
+    vk.render_pass = VK_NULL_HANDLE;
+    vk.pipeline_layout = VK_NULL_HANDLE;
+    vk.clear_pipeline = VK_NULL_HANDLE;
+    vk.vert_module = VK_NULL_HANDLE;
+    vk.frag_module = VK_NULL_HANDLE;
+    vk.images = NULL;
+    vk.image_views = NULL;
+    vk.framebuffers = NULL;
+    vk.image_count = 0;
+    vk.swapchain_extent = (VkExtent2D){0, 0};
+}
+
+static bool create_swapchain_resources(void) {
+    if (!create_swapchain())      goto fail;
+    if (!create_render_pass())    goto fail;
+    if (!create_clear_pipeline()) goto fail;
+    if (!create_framebuffers())   goto fail;
+    return true;
+
+fail:
+    destroy_swapchain_resources();
+    return false;
+}
+
+static bool recreate_swapchain(void) {
+    if (!vk.initialized)
+        return false;
+    if (!update_framebuffer_size())
+        return false;
+
+    vkDeviceWaitIdle(vk.device);
+    destroy_swapchain_resources();
+
+    if (!create_swapchain_resources()) {
+        fprintf(stderr, "[Vulkan] Failed to recreate swapchain\n");
+        return false;
+    }
+
+    fprintf(stderr, "[Vulkan] Recreated swapchain (%dx%d, %u images)\n",
+            vk.width, vk.height, vk.image_count);
     return true;
 }
 
@@ -595,12 +797,8 @@ bool engine_vulkan_init(void *glfw_window, int width, int height) {
         return false;
     }
     if (!pick_physical_device())  return false;
-    if (!find_queue_families())   return false;
     if (!create_device())         return false;
-    if (!create_swapchain())      return false;
-    if (!create_render_pass())    return false;
-    if (!create_clear_pipeline()) return false;
-    if (!create_framebuffers())   return false;
+    if (!create_swapchain_resources()) return false;
     if (!create_command_infra())  return false;
 
     vk.initialized = true;
@@ -619,21 +817,11 @@ void engine_vulkan_shutdown(void) {
         vkDestroyFence(vk.device, vk.in_flight[i], NULL);
     }
     vkDestroyCommandPool(vk.device, vk.cmd_pool, NULL);
-    for (uint32_t i = 0; i < vk.image_count; i++)
-        vkDestroyFramebuffer(vk.device, vk.framebuffers[i], NULL);
-    vkDestroyPipeline(vk.device, vk.clear_pipeline, NULL);
-    vkDestroyPipelineLayout(vk.device, vk.pipeline_layout, NULL);
-    vkDestroyShaderModule(vk.device, vk.vert_module, NULL);
-    vkDestroyShaderModule(vk.device, vk.frag_module, NULL);
-    vkDestroyRenderPass(vk.device, vk.render_pass, NULL);
-    for (uint32_t i = 0; i < vk.image_count; i++)
-        vkDestroyImageView(vk.device, vk.image_views[i], NULL);
-    vkDestroySwapchainKHR(vk.device, vk.swapchain, NULL);
+    destroy_swapchain_resources();
     vkDestroySurfaceKHR(vk.instance, vk.surface, NULL);
     vkDestroyDevice(vk.device, NULL);
     vkDestroyInstance(vk.instance, NULL);
 
-    free(vk.images); free(vk.image_views); free(vk.framebuffers);
     free(vk.cmd_buffers); free(vk.image_available);
     free(vk.render_finished); free(vk.in_flight);
 
@@ -649,19 +837,26 @@ void engine_vulkan_clear(float r, float g, float b, float a) {
 void engine_vulkan_begin_frame(void) {
     if (!vk.initialized) return;
     vkWaitForFences(vk.device, 1, &vk.in_flight[vk.frame_index], VK_TRUE, UINT64_MAX);
-    vkResetFences(vk.device, 1, &vk.in_flight[vk.frame_index]);
     vk.has_pending_clear = false;
 }
 
 void engine_vulkan_end_frame(void) {
     if (!vk.initialized) return;
+    if (!vk.swapchain) {
+        recreate_swapchain();
+        return;
+    }
 
     uint32_t image_index;
     VkResult acq = vkAcquireNextImageKHR(vk.device, vk.swapchain, UINT64_MAX,
                                           vk.image_available[vk.frame_index],
                                           VK_NULL_HANDLE, &image_index);
-    if (acq == VK_ERROR_OUT_OF_DATE_KHR || acq == VK_SUBOPTIMAL_KHR) return;
-    if (acq != VK_SUCCESS) return;
+    if (acq == VK_ERROR_OUT_OF_DATE_KHR) {
+        recreate_swapchain();
+        return;
+    }
+    bool needs_recreate = (acq == VK_SUBOPTIMAL_KHR);
+    if (acq != VK_SUCCESS && acq != VK_SUBOPTIMAL_KHR) return;
 
     VkCommandBuffer cmd = vk.cmd_buffers[vk.frame_index];
     vkResetCommandBuffer(cmd, 0);
@@ -692,6 +887,8 @@ void engine_vulkan_end_frame(void) {
     vkCmdEndRenderPass(cmd);
     vkEndCommandBuffer(cmd);
 
+    vkResetFences(vk.device, 1, &vk.in_flight[vk.frame_index]);
+
     VkPipelineStageFlags wait_stage = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
     VkSubmitInfo submit = {
         .sType                = VK_STRUCTURE_TYPE_SUBMIT_INFO,
@@ -708,8 +905,16 @@ void engine_vulkan_end_frame(void) {
         .swapchainCount     = 1, .pSwapchains     = &vk.swapchain,
         .pImageIndices      = &image_index,
     };
-    vkQueuePresentKHR(vk.present_queue, &present);
+    VkResult pres = vkQueuePresentKHR(vk.present_queue, &present);
+    if (pres == VK_ERROR_OUT_OF_DATE_KHR || pres == VK_SUBOPTIMAL_KHR) {
+        needs_recreate = true;
+    } else if (pres != VK_SUCCESS) {
+        fprintf(stderr, "[Vulkan] vkQueuePresentKHR failed: %d\n", pres);
+    }
     vk.frame_index = (vk.frame_index + 1) % VK_MAX_FRAMES_IN_FLIGHT;
+
+    if (needs_recreate)
+        recreate_swapchain();
 }
 
 bool engine_vulkan_init_window(const char *title, int width, int height) {
