@@ -57,6 +57,10 @@
 #define GLOBAL_FX_PASS_ENABLED 0 ///+
 #endif
 
+#ifndef ENABLE_VULKAN
+#define ENABLE_VULKAN 0 ///+
+#endif
+
 #ifndef ENABLE_REVERSE_Z
 #define ENABLE_REVERSE_Z 0 //ifdef(ems, 0, 1) ///+
 #endif

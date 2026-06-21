@@ -159,6 +159,10 @@ extern "C" {
 #define GLOBAL_FX_PASS_ENABLED 0 ///+
 #endif
 
+#ifndef ENABLE_VULKAN
+#define ENABLE_VULKAN 0 ///+
+#endif
+
 #ifndef ENABLE_REVERSE_Z
 #define ENABLE_REVERSE_Z 0 //ifdef(ems, 0, 1) ///+
 #endif
@@ -5241,7 +5245,16 @@ enum WINDOW_FLAGS {
     WINDOW_VSYNC_ADAPTIVE = 0x1000,
 };
 
+#ifndef ENGINE_BACKEND_T_DEFINED
+#define ENGINE_BACKEND_T_DEFINED
+typedef enum engine_backend_t {
+    ENGINE_BACKEND_GL     = 0,
+    ENGINE_BACKEND_VULKAN = 1,
+} engine_backend_t;
+#endif
+
 API bool     window_create(float scale, unsigned flags);
+API bool     window_create_ex(float scale, unsigned flags, engine_backend_t backend);
 API bool     window_create_from_handle(void *handle, float scale, unsigned flags);
 API void     window_destroy();
 API void     window_reload();

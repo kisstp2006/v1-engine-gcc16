@@ -24,7 +24,16 @@ enum WINDOW_FLAGS {
     WINDOW_VSYNC_ADAPTIVE = 0x1000,
 };
 
+#ifndef ENGINE_BACKEND_T_DEFINED
+#define ENGINE_BACKEND_T_DEFINED
+typedef enum engine_backend_t {
+    ENGINE_BACKEND_GL     = 0,
+    ENGINE_BACKEND_VULKAN = 1,
+} engine_backend_t;
+#endif
+
 API bool     window_create(float scale, unsigned flags);
+API bool     window_create_ex(float scale, unsigned flags, engine_backend_t backend);
 API bool     window_create_from_handle(void *handle, float scale, unsigned flags);
 API void     window_destroy();
 API void     window_reload();

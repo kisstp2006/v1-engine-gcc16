@@ -20,10 +20,13 @@
 
 /* ── Backend selection ───────────────────────────────────────────────────── */
 
-typedef enum {
+#ifndef ENGINE_BACKEND_T_DEFINED
+#define ENGINE_BACKEND_T_DEFINED
+typedef enum engine_backend_t {
     ENGINE_BACKEND_GL     = 0,
     ENGINE_BACKEND_VULKAN = 1,
 } engine_backend_t;
+#endif
 
 /* ── Render dispatch vtable (shared by GL and Vulkan paths) ─────────────── */
 /*

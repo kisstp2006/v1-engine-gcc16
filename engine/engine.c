@@ -29490,6 +29490,14 @@ static char title[128] = {0};
 static char screenshot_file[DIR_MAX];
 static int locked_aspect_ratio = 0;
 static vec4 winbgcolor = {0,0,0,1};
+static engine_backend_t window_backend = ENGINE_BACKEND_GL;
+
+#if ENABLE_VULKAN
+extern bool engine_vulkan_init(void *glfw_window, int width, int height);
+extern void engine_vulkan_shutdown(void);
+extern void engine_vulkan_begin_frame(void);
+extern void engine_vulkan_end_frame(void);
+#endif
 
 vec4 window_getcolor_() { return winbgcolor; } // internal
 
@@ -29648,6 +29656,130 @@ void glNewFrame() {
 }
 
 static bool cook_done = false;
+
+static bool window_create_vulkan(float scale, unsigned flags) {
+#if !ENABLE_VULKAN
+    (void)scale; (void)flags;
+    return PANIC("Vulkan backend requested, but ENABLE_VULKAN is 0. Build with -DENABLE_VULKAN=1 and link engine_vulkan.c + -lvulkan."), false;
+#else
+    ifdef(debug, if( flag("--test") ) exit( test_errors ? -test_errors : 0 ));
+
+    glfw_init();
+    framework_init();
+    if(!t) t = glfwGetTime();
+
+    #if is(ems)
+    return PANIC("Vulkan backend is not available on Emscripten"), false;
+    #endif
+
+    if( flag("--fullscreen") ) scale = 100;
+    scale = (scale < 1 ? scale * 100 : scale);
+
+    bool FLAGS_FULLSCREEN = scale > 100;
+    bool FLAGS_FULLSCREEN_DESKTOP = scale == 100;
+    bool FLAGS_WINDOWED = scale < 100;
+    bool FLAGS_TRUE_BORDERLESS = flags & WINDOW_TRUE_BORDERLESS;
+    bool FLAGS_TRANSPARENT = flag("--transparent") || (flags & WINDOW_TRANSPARENT);
+    if( FLAGS_TRANSPARENT ) FLAGS_FULLSCREEN = 0, FLAGS_FULLSCREEN_DESKTOP = 0, FLAGS_WINDOWED = 1;
+    scale = (scale > 100 ? 100 : scale) / 100.f;
+    int winWidth = window_canvas().w * scale;
+    int winHeight = window_canvas().h * scale;
+
+    if (FLAGS_TRUE_BORDERLESS) {
+        FLAGS_FULLSCREEN = FLAGS_FULLSCREEN_DESKTOP = 0;
+        FLAGS_WINDOWED = 1;
+        flags |= WINDOW_BORDERLESS;
+    }
+
+    if (tests_captureframes()) {
+        winWidth = 1280;
+        winHeight = 720;
+    }
+
+    win_flags = flags;
+    g->flags = flags;
+
+    glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);
+    glfwWindowHint(GLFW_AUTO_ICONIFY, GL_FALSE);
+    glfwWindowHint(GLFW_FOCUSED, GL_TRUE);
+    glfwWindowHint(GLFW_VISIBLE, GL_FALSE);
+    glfwWindowHint(GLFW_RESIZABLE, (flags & WINDOW_FIXED) ? GL_FALSE : GL_TRUE);
+
+    GLFWmonitor* monitor = NULL;
+    if( FLAGS_FULLSCREEN || FLAGS_FULLSCREEN_DESKTOP ) {
+        monitor = glfwGetPrimaryMonitor();
+    }
+    if( FLAGS_FULLSCREEN_DESKTOP ) {
+        const GLFWvidmode* mode = glfwGetVideoMode(monitor);
+        glfwWindowHint(GLFW_RED_BITS, mode->redBits);
+        glfwWindowHint(GLFW_GREEN_BITS, mode->greenBits);
+        glfwWindowHint(GLFW_BLUE_BITS, mode->blueBits);
+        glfwWindowHint(GLFW_REFRESH_RATE, mode->refreshRate);
+        winWidth = mode->width;
+        winHeight = mode->height;
+    }
+    if( FLAGS_WINDOWED ) {
+        if( FLAGS_TRANSPARENT ) {
+            glfwWindowHint(GLFW_TRANSPARENT_FRAMEBUFFER, GLFW_TRUE);
+        }
+        if( flags & WINDOW_BORDERLESS ) {
+            glfwWindowHint(GLFW_DECORATED, GLFW_FALSE);
+        }
+
+        float ratio = (float)winWidth / (winHeight + !winHeight);
+        if( flags & WINDOW_SQUARE )    winWidth = winHeight = winWidth > winHeight ? winHeight : winWidth;
+        if( flags & WINDOW_PORTRAIT )  if( winWidth > winHeight ) winWidth = winHeight * (1.f / ratio);
+    }
+
+    window = glfwCreateWindow(winWidth, winHeight, "", monitor, NULL);
+    if( !window ) return PANIC("GLFW Vulkan window creation failed"), false;
+
+    glfwGetFramebufferSize(window, &w, &h);
+    if( flags & WINDOW_FIXED ) {
+        glfwSetWindowSizeLimits(window, w, h, w, h);
+    }
+    if( flags & (WINDOW_SQUARE | WINDOW_PORTRAIT | WINDOW_LANDSCAPE | WINDOW_ASPECT) ) {
+        window_aspect_lock(w, h);
+    }
+
+    if( FLAGS_WINDOWED ) {
+        monitor = monitor ? monitor : glfwGetPrimaryMonitor();
+        const GLFWvidmode* mode = glfwGetVideoMode(monitor);
+        int area_width = mode->width, area_height = mode->height;
+        glfwGetMonitorWorkarea(monitor, &xpos, &ypos, &area_width, &area_height);
+        glfwSetWindowPos(window, xpos = xpos + (area_width - winWidth) / 2, ypos = ypos + (area_height - winHeight) / 2);
+        wprev = w, hprev = h;
+        xprev = xpos, yprev = ypos;
+    }
+
+    if( !engine_vulkan_init(window, w, h) ) {
+        glfwDestroyWindow(window);
+        window = NULL;
+        return false;
+    }
+
+    window_backend = ENGINE_BACKEND_VULKAN;
+    g->ctx = NULL;
+    g->nk_glfw = NULL;
+    g->window = window;
+    g->width = w;
+    g->height = h;
+
+    if (glfwRawMouseMotionSupported()) {
+        glfwSetInputMode(window, GLFW_RAW_MOUSE_MOTION, GLFW_TRUE);
+    }
+    glfwSetDropCallback(window, window_drop_callback);
+    input_init();
+
+    const GLFWvidmode *mode = glfwGetVideoMode(monitor ? monitor : glfwGetPrimaryMonitor());
+    PRINTF("Build version: %s\n", BUILD_VERSION);
+    PRINTF("Monitor: %s (%dHz, backend=Vulkan)\n", glfwGetMonitorName(monitor ? monitor : glfwGetPrimaryMonitor()), mode->refreshRate);
+    PRINTF("Window: %dx%d\n", g->width, g->height);
+
+    glfwShowWindow(window);
+    return true;
+#endif
+}
 
 bool window_create_from_handle(void *handle, float scale, unsigned flags) {
     // abort run if any test suite failed in unit-test mode
@@ -29891,12 +30023,21 @@ bool window_create_from_handle(void *handle, float scale, unsigned flags) {
     gl_reversez = 0;
 #endif
 
+    window_backend = ENGINE_BACKEND_GL;
     framework_post_init(mode->refreshRate);
     return true;
 }
 
+bool window_create_ex(float scale, unsigned flags, engine_backend_t backend) {
+    if( backend == ENGINE_BACKEND_GL )
+        return window_create_from_handle(NULL, scale, flags);
+    if( backend == ENGINE_BACKEND_VULKAN )
+        return window_create_vulkan(scale, flags);
+    return PANIC("Unknown window backend: %d", backend), false;
+}
+
 bool window_create(float scale, unsigned flags) {
-    return window_create_from_handle(NULL, scale, flags);
+    return window_create_ex(scale, flags, ENGINE_BACKEND_GL);
 }
 
 void window_destroy() {
@@ -29943,6 +30084,36 @@ char* window_stats() {
 }
 
 int window_frame_begin() {
+    if( window_backend == ENGINE_BACKEND_VULKAN ) {
+        glfwPollEvents();
+        if( glfwWindowShouldClose(g->window) ) return 0;
+
+        glfwGetFramebufferSize(window, &w, &h);
+        g->width = w;
+        g->height = h;
+
+        double now = paused ? t : glfwGetTime();
+        dt = now - t;
+        t = now;
+
+    #if !ENABLE_RETAIL
+        char *st = window_stats();
+        static double timer_vk = 0;
+        timer_vk += window_delta();
+        if( timer_vk >= 0.25 ) {
+            glfwSetWindowTitle(window, st);
+            timer_vk = 0;
+        }
+    #else
+        glfwSetWindowTitle(window, title);
+    #endif
+
+    #if ENABLE_VULKAN
+        engine_vulkan_begin_frame();
+    #endif
+        return 1;
+    }
+
     glfwPollEvents();
 
     // we cannot simply terminate threads on some OSes. also, aborted cook jobs could leave temporary files on disc.
@@ -30021,6 +30192,8 @@ int window_frame_begin() {
 }
 
 void window_frame_end() {
+    if( window_backend == ENGINE_BACKEND_VULKAN ) return;
+
     // flush batching systems that need to be rendered before frame swapping. order matters.
     {
         font_goto(0,0);
@@ -30056,6 +30229,15 @@ void window_frame_end() {
 }
 
 void window_frame_swap() {
+    if( window_backend == ENGINE_BACKEND_VULKAN ) {
+    #if ENABLE_VULKAN
+        engine_vulkan_end_frame();
+    #endif
+        static int delay_vk = 0; do_once delay_vk = optioni("--delay", 0);
+        if( delay_vk ) sleep_ms( delay_vk );
+        return;
+    }
+
     // glFinish();
 #if !is(ems)
     window_vsync(hz);
@@ -30085,11 +30267,31 @@ void window_shutdown() {
         #endif
 
         window_loop_exit(); // finish emscripten loop automatically
+#if ENABLE_VULKAN
+        if( window_backend == ENGINE_BACKEND_VULKAN )
+            engine_vulkan_shutdown();
+#endif
         glfwTerminate();
     }
 }
 
 int window_swap() {
+    if( window_backend == ENGINE_BACKEND_VULKAN ) {
+        if( frame_count > 0 ) {
+            window_frame_swap();
+        }
+
+        ++frame_count;
+
+        int ready = window_frame_begin();
+        if( !ready ) {
+            window_shutdown();
+            return 0;
+        }
+
+        return 1;
+    }
+
     // end frame
     if( frame_count > 0 ) {
         if (GLOBAL_FX_PASS_ENABLED && !postfx_backbuffer_draw) {
