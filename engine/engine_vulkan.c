@@ -36,6 +36,7 @@ extern void   glfwWindowHint(int hint, int value);
 extern void   glfwGetFramebufferSize(GLFWwindow* window, int* width, int* height);
 extern GLFWwindow* glfwCreateWindow(int w, int h, const char* title,
                                     GLFWmonitor* monitor, GLFWwindow* share);
+extern void   glfwDestroyWindow(GLFWwindow* window);
 extern int    glfwVulkanSupported(void);
 extern const char** glfwGetRequiredInstanceExtensions(uint32_t* count);
 extern int    glfwCreateWindowSurface(VkInstance instance, GLFWwindow* window,
@@ -745,6 +746,33 @@ static bool recreate_swapchain(void) {
 
 /* ── Command pool + buffers + sync objects ───────────────────────────────── */
 
+static void destroy_command_infra(void) {
+    if (vk.device) {
+        for (uint32_t i = 0; i < VK_MAX_FRAMES_IN_FLIGHT; i++) {
+            if (vk.image_available && vk.image_available[i])
+                vkDestroySemaphore(vk.device, vk.image_available[i], NULL);
+            if (vk.render_finished && vk.render_finished[i])
+                vkDestroySemaphore(vk.device, vk.render_finished[i], NULL);
+            if (vk.in_flight && vk.in_flight[i])
+                vkDestroyFence(vk.device, vk.in_flight[i], NULL);
+        }
+        if (vk.cmd_pool)
+            vkDestroyCommandPool(vk.device, vk.cmd_pool, NULL);
+    }
+
+    free(vk.cmd_buffers);
+    free(vk.image_available);
+    free(vk.render_finished);
+    free(vk.in_flight);
+
+    vk.cmd_pool = VK_NULL_HANDLE;
+    vk.cmd_buffers = NULL;
+    vk.image_available = NULL;
+    vk.render_finished = NULL;
+    vk.in_flight = NULL;
+    vk.frame_index = 0;
+}
+
 static bool create_command_infra(void) {
     VkCommandPoolCreateInfo pool_ci = {
         .sType            = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,
@@ -753,10 +781,12 @@ static bool create_command_infra(void) {
     };
     VK_CHECK(vkCreateCommandPool(vk.device, &pool_ci, NULL, &vk.cmd_pool));
 
-    vk.cmd_buffers     = malloc(VK_MAX_FRAMES_IN_FLIGHT * sizeof(VkCommandBuffer));
-    vk.image_available = malloc(VK_MAX_FRAMES_IN_FLIGHT * sizeof(VkSemaphore));
-    vk.render_finished = malloc(VK_MAX_FRAMES_IN_FLIGHT * sizeof(VkSemaphore));
-    vk.in_flight       = malloc(VK_MAX_FRAMES_IN_FLIGHT * sizeof(VkFence));
+    vk.cmd_buffers     = calloc(VK_MAX_FRAMES_IN_FLIGHT, sizeof(VkCommandBuffer));
+    vk.image_available = calloc(VK_MAX_FRAMES_IN_FLIGHT, sizeof(VkSemaphore));
+    vk.render_finished = calloc(VK_MAX_FRAMES_IN_FLIGHT, sizeof(VkSemaphore));
+    vk.in_flight       = calloc(VK_MAX_FRAMES_IN_FLIGHT, sizeof(VkFence));
+    if (!vk.cmd_buffers || !vk.image_available || !vk.render_finished || !vk.in_flight)
+        return false;
 
     VkCommandBufferAllocateInfo alloc_info = {
         .sType              = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
@@ -777,6 +807,23 @@ static bool create_command_infra(void) {
     return true;
 }
 
+static void cleanup_vulkan_objects(bool wait_idle) {
+    if (vk.device) {
+        if (wait_idle)
+            vkDeviceWaitIdle(vk.device);
+        destroy_command_infra();
+        destroy_swapchain_resources();
+        vkDestroyDevice(vk.device, NULL);
+    }
+
+    if (vk.surface && vk.instance)
+        vkDestroySurfaceKHR(vk.instance, vk.surface, NULL);
+    if (vk.instance)
+        vkDestroyInstance(vk.instance, NULL);
+
+    memset(&vk, 0, sizeof(vk));
+}
+
 /* ── Public lifecycle ────────────────────────────────────────────────────── */
 
 bool engine_vulkan_init(void *glfw_window, int width, int height) {
@@ -787,45 +834,33 @@ bool engine_vulkan_init(void *glfw_window, int width, int height) {
 
     if (!glfwVulkanSupported()) {
         fprintf(stderr, "[Vulkan] Vulkan not supported by GLFW\n");
-        return false;
+        goto fail;
     }
 
-    if (!create_instance())       return false;
+    if (!create_instance())       goto fail;
     /* Surface must be created before pick_physical_device (for present support query) */
     if (glfwCreateWindowSurface(vk.instance, vk.window, NULL, &vk.surface) != VK_SUCCESS) {
         fprintf(stderr, "[Vulkan] Failed to create window surface\n");
-        return false;
+        goto fail;
     }
-    if (!pick_physical_device())  return false;
-    if (!create_device())         return false;
-    if (!create_swapchain_resources()) return false;
-    if (!create_command_infra())  return false;
+    if (!pick_physical_device())  goto fail;
+    if (!create_device())         goto fail;
+    if (!create_swapchain_resources()) goto fail;
+    if (!create_command_infra())  goto fail;
 
     vk.initialized = true;
     fprintf(stderr, "[Vulkan] Initialised (%dx%d, %u swapchain images)\n",
             width, height, vk.image_count);
     return true;
+
+fail:
+    cleanup_vulkan_objects(true);
+    return false;
 }
 
 void engine_vulkan_shutdown(void) {
-    if (!vk.initialized) return;
-    vkDeviceWaitIdle(vk.device);
-
-    for (uint32_t i = 0; i < VK_MAX_FRAMES_IN_FLIGHT; i++) {
-        vkDestroySemaphore(vk.device, vk.image_available[i], NULL);
-        vkDestroySemaphore(vk.device, vk.render_finished[i],  NULL);
-        vkDestroyFence(vk.device, vk.in_flight[i], NULL);
-    }
-    vkDestroyCommandPool(vk.device, vk.cmd_pool, NULL);
-    destroy_swapchain_resources();
-    vkDestroySurfaceKHR(vk.instance, vk.surface, NULL);
-    vkDestroyDevice(vk.device, NULL);
-    vkDestroyInstance(vk.instance, NULL);
-
-    free(vk.cmd_buffers); free(vk.image_available);
-    free(vk.render_finished); free(vk.in_flight);
-
-    memset(&vk, 0, sizeof(vk));
+    if (!vk.instance && !vk.device) return;
+    cleanup_vulkan_objects(true);
 }
 
 void engine_vulkan_clear(float r, float g, float b, float a) {
@@ -926,7 +961,11 @@ bool engine_vulkan_init_window(const char *title, int width, int height) {
                                        title ? title : "Nebula (Vulkan)",
                                        NULL, NULL);
     if (!win) { fprintf(stderr, "[Vulkan] glfwCreateWindow failed\n"); return false; }
-    return engine_vulkan_init(win, width, height);
+    if (!engine_vulkan_init(win, width, height)) {
+        glfwDestroyWindow(win);
+        return false;
+    }
+    return true;
 }
 
 bool engine_vulkan_poll_events(void) {
