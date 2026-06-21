@@ -865,10 +865,11 @@ void engine_vulkan_end_frame(void) {
     vkBeginCommandBuffer(cmd, &begin_info);
 
     /* Clear colour (cornflower blue default) */
-    float clear_r = vk.pending_clear[0] > 0 ? vk.pending_clear[0] : 0.392f;
-    float clear_g = vk.pending_clear[1] > 0 ? vk.pending_clear[1] : 0.584f;
-    float clear_b = vk.pending_clear[2] > 0 ? vk.pending_clear[2] : 0.929f;
-    VkClearValue clear_val = { .color = {{ clear_r, clear_g, clear_b, 1.0f }} };
+    float clear_r = vk.has_pending_clear ? vk.pending_clear[0] : 0.392f;
+    float clear_g = vk.has_pending_clear ? vk.pending_clear[1] : 0.584f;
+    float clear_b = vk.has_pending_clear ? vk.pending_clear[2] : 0.929f;
+    float clear_a = vk.has_pending_clear ? vk.pending_clear[3] : 1.0f;
+    VkClearValue clear_val = { .color = {{ clear_r, clear_g, clear_b, clear_a }} };
 
     VkRenderPassBeginInfo rp_info = {
         .sType           = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO,
@@ -881,7 +882,7 @@ void engine_vulkan_end_frame(void) {
     vkCmdBeginRenderPass(cmd, &rp_info, VK_SUBPASS_CONTENTS_INLINE);
     /* Draw fullscreen triangle via clear pipeline (push constant colour) */
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, vk.clear_pipeline);
-    float pc[4] = { clear_r, clear_g, clear_b, 1.0f };
+    float pc[4] = { clear_r, clear_g, clear_b, clear_a };
     vkCmdPushConstants(cmd, vk.pipeline_layout, VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(pc), pc);
     vkCmdDraw(cmd, 3, 1, 0, 0);
     vkCmdEndRenderPass(cmd);
