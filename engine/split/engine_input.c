@@ -194,6 +194,11 @@ void input_init() {
     #endif
 }
 
+/* Vulkan-mode scroll accumulator — used when nk_glfw is not available */
+static double vk_scroll_x = 0, vk_scroll_y = 0;
+static void vk_scroll_cb(GLFWwindow *w, double x, double y) { (void)w; vk_scroll_x += x; vk_scroll_y += y; }
+void input_enable_vulkan_scroll(void *win) { glfwSetScrollCallback((GLFWwindow*)win, vk_scroll_cb); }
+
 static int any_key = 0;
 int input_anykey() {
     return any_key;
@@ -218,8 +223,13 @@ void input_update() {
     floats[MOUSE_X] = mx;
     floats[MOUSE_Y] = my;
     struct nk_glfw* glfw = glfwGetWindowUserPointer(win); // from nuklear, because it is overriding glfwSetScrollCallback()
-    floats[MOUSE_W] = !glfw ? 0 : mouse_wheel_old + (float)glfw->scroll_bak.x + (float)glfw->scroll_bak.y;
-    glfw->scroll_bak.x = glfw->scroll_bak.y = 0;
+    if( glfw ) {
+        floats[MOUSE_W] = mouse_wheel_old + (float)glfw->scroll_bak.x + (float)glfw->scroll_bak.y;
+        glfw->scroll_bak.x = glfw->scroll_bak.y = 0;
+    } else {
+        floats[MOUSE_W] = mouse_wheel_old + (float)vk_scroll_x + (float)vk_scroll_y;
+        vk_scroll_x = vk_scroll_y = 0;
+    }
 
     // Dear Win32 users,
     // - Touchpad cursor freezing when any key is being pressed?

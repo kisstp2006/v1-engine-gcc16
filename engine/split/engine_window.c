@@ -404,6 +404,9 @@ static bool window_create_vulkan(float scale, unsigned flags) {
     PRINTF("Monitor: %s (%dHz, backend=Vulkan)\n", glfwGetMonitorName(monitor ? monitor : glfwGetPrimaryMonitor()), mode->refreshRate);
     PRINTF("Window: %dx%d\n", g->width, g->height);
 
+    /* Install scroll callback for Vulkan mode (nk_glfw3_init would do this in GL mode) */
+    { extern void input_enable_vulkan_scroll(void *win); input_enable_vulkan_scroll(window); }
+
     /* Wait for the asset cook to finish and reload the VFS.
      * The GL path does this inside framework_post_init() (called from window_create_from_handle).
      * Vulkan skips that path entirely, so we do it here explicitly. */
@@ -411,9 +414,15 @@ static bool window_create_vulkan(float scale, unsigned flags) {
         extern int  cook_progress(void);
         extern void cook_stop(void);
         extern void vfs_reload(void);
+        extern void profiler_init(void);
+        extern void audio_init(int);
+        extern void network_init(void);
         while (cook_progress() < 100) glfwPollEvents();
         cook_stop();
         vfs_reload();
+        profiler_init();
+        audio_init(0);
+        network_init();
     }
 
     glfwShowWindow(window);
@@ -680,6 +689,9 @@ bool window_create_ex(float scale, unsigned flags, engine_backend_t backend) {
 }
 
 bool window_create(float scale, unsigned flags) {
+#if ENABLE_VULKAN
+    if( flag("--vulkan") ) return window_create_ex(scale, flags, ENGINE_BACKEND_VULKAN);
+#endif
     return window_create_ex(scale, flags, ENGINE_BACKEND_GL);
 }
 
@@ -760,6 +772,8 @@ int window_frame_begin() {
             g_render_api->clear(winbgcolor.r, winbgcolor.g, winbgcolor.b,
                                 window_has_transparent() ? 0 : winbgcolor.a);
     #endif
+        void input_update();
+        input_update();
         return 1;
     }
 
