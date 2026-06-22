@@ -394,9 +394,11 @@ static const size_t g_nk_frag_spv_size = sizeof(g_nk_frag_spv);
 typedef struct vulkan_texture_t {
     bool alive;
     uint32_t width, height;
+    uint32_t mip_levels;
     VkImage image;
     VkDeviceMemory memory;
     VkImageView view;
+    VkSampler sampler;           /* per-texture, created from TEXTURE_* flags */
     VkDescriptorSet descriptor_set;
 } vulkan_texture_t;
 
@@ -453,7 +455,7 @@ static struct {
     VkShaderModule        textured_frag_module;
     VkDescriptorSetLayout texture_descriptor_layout;
     VkDescriptorPool      texture_descriptor_pool;
-    VkSampler             texture_sampler;
+    /* No global sampler — each texture has its own sampler based on TEXTURE_* flags */
 
     VkCommandPool         cmd_pool;
     VkCommandBuffer      *cmd_buffers;
@@ -857,6 +859,8 @@ static void destroy_vulkan_texture(vulkan_texture_t *texture) {
         return;
     if (texture->descriptor_set && vk.texture_descriptor_pool)
         vkFreeDescriptorSets(vk.device, vk.texture_descriptor_pool, 1, &texture->descriptor_set);
+    if (texture->sampler)
+        vkDestroySampler(vk.device, texture->sampler, NULL);
     if (texture->view)
         vkDestroyImageView(vk.device, texture->view, NULL);
     if (texture->image)
@@ -877,13 +881,11 @@ static void destroy_texture_infra(void) {
     vk.texture_capacity = 0;
     vk.white_texture = 0;
 
-    if (vk.texture_sampler)
-        vkDestroySampler(vk.device, vk.texture_sampler, NULL);
+
     if (vk.texture_descriptor_pool)
         vkDestroyDescriptorPool(vk.device, vk.texture_descriptor_pool, NULL);
     if (vk.texture_descriptor_layout)
         vkDestroyDescriptorSetLayout(vk.device, vk.texture_descriptor_layout, NULL);
-    vk.texture_sampler = VK_NULL_HANDLE;
     vk.texture_descriptor_pool = VK_NULL_HANDLE;
     vk.texture_descriptor_layout = VK_NULL_HANDLE;
 }
@@ -917,20 +919,6 @@ static bool create_texture_infra(void) {
     VK_CHECK(vkCreateDescriptorPool(vk.device, &pool_ci, NULL,
                                     &vk.texture_descriptor_pool));
 
-    VkSamplerCreateInfo sampler_ci = {
-        .sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO,
-        .magFilter = VK_FILTER_LINEAR,
-        .minFilter = VK_FILTER_LINEAR,
-        .addressModeU = VK_SAMPLER_ADDRESS_MODE_REPEAT,
-        .addressModeV = VK_SAMPLER_ADDRESS_MODE_REPEAT,
-        .addressModeW = VK_SAMPLER_ADDRESS_MODE_REPEAT,
-        .anisotropyEnable = VK_FALSE,
-        .borderColor = VK_BORDER_COLOR_INT_OPAQUE_WHITE,
-        .unnormalizedCoordinates = VK_FALSE,
-        .compareEnable = VK_FALSE,
-        .mipmapMode = VK_SAMPLER_MIPMAP_MODE_LINEAR,
-    };
-    VK_CHECK(vkCreateSampler(vk.device, &sampler_ci, NULL, &vk.texture_sampler));
     return true;
 }
 
@@ -960,10 +948,108 @@ static vulkan_texture_t *lookup_texture(fwk_backend_texture_t handle) {
     return texture->alive ? texture : NULL;
 }
 
+/* Create a sampler respecting TEXTURE_* flags (mirrors GL glTexParameteri behavior) */
+static VkSampler vk_create_sampler_for_flags(int flags) {
+    /* TEXTURE_LINEAR = 64, TEXTURE_NEAREST = 0 */
+    VkFilter filter = (flags & 64) ? VK_FILTER_LINEAR : VK_FILTER_NEAREST;
+    VkSamplerMipmapMode mip_mode = (flags & 64) ? VK_SAMPLER_MIPMAP_MODE_LINEAR
+                                                 : VK_SAMPLER_MIPMAP_MODE_NEAREST;
+    /* TEXTURE_REPEAT = 0x200, TEXTURE_BORDER = 0x100, TEXTURE_CLAMP = 0 (default) */
+    VkSamplerAddressMode wrap;
+    if      (flags & 0x200) wrap = VK_SAMPLER_ADDRESS_MODE_REPEAT;
+    else if (flags & 0x100) wrap = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER;
+    else                    wrap = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+
+    bool has_mipmaps = !!(flags & 128); /* TEXTURE_MIPMAPS */
+
+    VkSamplerCreateInfo ci = {
+        .sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO,
+        .magFilter = filter,
+        .minFilter = filter,
+        .addressModeU = wrap,
+        .addressModeV = wrap,
+        .addressModeW = wrap,
+        .anisotropyEnable = VK_FALSE,
+        .borderColor = VK_BORDER_COLOR_FLOAT_TRANSPARENT_BLACK,
+        .unnormalizedCoordinates = VK_FALSE,
+        .compareEnable = VK_FALSE,
+        .mipmapMode = mip_mode,
+        .minLod = 0.0f,
+        .maxLod = has_mipmaps ? VK_LOD_CLAMP_NONE : 0.0f,
+    };
+    VkSampler sampler = VK_NULL_HANDLE;
+    vkCreateSampler(vk.device, &ci, NULL, &sampler);
+    return sampler;
+}
+
+/* Generate mipmaps for an image already in TRANSFER_DST_OPTIMAL for level 0.
+ * Uses image blits: transitions each level src→TRANSFER_SRC, blits to next, transitions to SHADER_READ. */
+static bool vk_generate_mipmaps(VkImage image, uint32_t w, uint32_t h, uint32_t mip_levels) {
+    VkCommandBuffer cmd;
+    if (!begin_single_time_commands(&cmd)) return false;
+
+    int32_t mip_w = (int32_t)w, mip_h = (int32_t)h;
+    for (uint32_t i = 1; i < mip_levels; i++) {
+        /* Transition level i-1: TRANSFER_DST → TRANSFER_SRC */
+        VkImageMemoryBarrier barrier = {
+            .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
+            .srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT,
+            .dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT,
+            .oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+            .newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+            .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+            .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+            .image = image,
+            .subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, i-1, 1, 0, 1 },
+        };
+        vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                             0, 0, NULL, 0, NULL, 1, &barrier);
+
+        /* Blit level i-1 → level i at half size */
+        VkImageBlit blit = {
+            .srcSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, i-1, 0, 1 },
+            .srcOffsets = { {0,0,0}, {mip_w, mip_h, 1} },
+            .dstSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, i, 0, 1 },
+            .dstOffsets = { {0,0,0}, {mip_w>1?mip_w/2:1, mip_h>1?mip_h/2:1, 1} },
+        };
+        vkCmdBlitImage(cmd,
+            image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+            image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+            1, &blit, VK_FILTER_LINEAR);
+
+        /* Transition level i-1: TRANSFER_SRC → SHADER_READ */
+        barrier.srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+        barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+        barrier.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+        barrier.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+                             0, 0, NULL, 0, NULL, 1, &barrier);
+
+        if (mip_w > 1) mip_w /= 2;
+        if (mip_h > 1) mip_h /= 2;
+    }
+
+    /* Transition last mip level: TRANSFER_DST → SHADER_READ */
+    VkImageMemoryBarrier last = {
+        .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
+        .srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT,
+        .dstAccessMask = VK_ACCESS_SHADER_READ_BIT,
+        .oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+        .newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+        .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+        .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+        .image = image,
+        .subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, mip_levels-1, 1, 0, 1 },
+    };
+    vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+                         0, 0, NULL, 0, NULL, 1, &last);
+
+    return end_single_time_commands(cmd);
+}
+
 static bool create_vulkan_texture_resource(vulkan_texture_t *texture,
                                            unsigned w, unsigned h, unsigned n,
                                            const void *pixels, int flags) {
-    (void)flags;
     if (!texture || !vk.cmd_pool || !vk.texture_descriptor_layout ||
         w == 0 || h == 0 || n == 0 || n > 4)
         return false;
@@ -993,16 +1079,27 @@ static bool create_vulkan_texture_resource(vulkan_texture_t *texture,
     vkUnmapMemory(vk.device, staging_memory);
     free(rgba);
 
+    /* Compute mip levels (TEXTURE_MIPMAPS = 128) */
+    bool want_mipmaps = !!(flags & 128);
+    uint32_t mip_levels = 1;
+    if (want_mipmaps) {
+        uint32_t m = w > h ? w : h;
+        while (m > 1) { m >>= 1; mip_levels++; }
+    }
+
+    VkImageUsageFlags usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+    if (want_mipmaps) usage |= VK_IMAGE_USAGE_TRANSFER_SRC_BIT; /* needed for blit-based mip gen */
+
     VkImageCreateInfo image_ci = {
         .sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
         .imageType = VK_IMAGE_TYPE_2D,
         .extent = { w, h, 1 },
-        .mipLevels = 1,
+        .mipLevels = mip_levels,
         .arrayLayers = 1,
         .format = VK_FORMAT_R8G8B8A8_UNORM,
         .tiling = VK_IMAGE_TILING_OPTIMAL,
         .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
-        .usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
+        .usage = usage,
         .samples = VK_SAMPLE_COUNT_1_BIT,
         .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
     };
@@ -1012,41 +1109,47 @@ static bool create_vulkan_texture_resource(vulkan_texture_t *texture,
     VkMemoryRequirements req;
     vkGetImageMemoryRequirements(vk.device, texture->image, &req);
     uint32_t mem_type = find_memory_type(req.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
-    if (mem_type == UINT32_MAX)
-        goto fail;
+    if (mem_type == UINT32_MAX) goto fail;
 
     VkMemoryAllocateInfo alloc = {
         .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
         .allocationSize = req.size,
         .memoryTypeIndex = mem_type,
     };
-    if (vkAllocateMemory(vk.device, &alloc, NULL, &texture->memory) != VK_SUCCESS)
-        goto fail;
-    if (vkBindImageMemory(vk.device, texture->image, texture->memory, 0) != VK_SUCCESS)
-        goto fail;
+    if (vkAllocateMemory(vk.device, &alloc, NULL, &texture->memory) != VK_SUCCESS) goto fail;
+    if (vkBindImageMemory(vk.device, texture->image, texture->memory, 0) != VK_SUCCESS) goto fail;
 
+    /* Upload base mip (level 0) */
     if (!transition_image_layout(texture->image, VK_IMAGE_LAYOUT_UNDEFINED,
-                                 VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL))
-        goto fail;
-    if (!copy_buffer_to_image(staging, texture->image, w, h))
-        goto fail;
-    if (!transition_image_layout(texture->image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-                                 VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL))
-        goto fail;
+                                 VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL)) goto fail;
+    if (!copy_buffer_to_image(staging, texture->image, w, h)) goto fail;
+
+    /* Generate remaining mip levels, or just transition to shader read */
+    if (want_mipmaps && mip_levels > 1) {
+        if (!vk_generate_mipmaps(texture->image, w, h, mip_levels)) goto fail;
+    } else {
+        if (!transition_image_layout(texture->image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                                     VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL)) goto fail;
+    }
 
     VkImageViewCreateInfo view_ci = {
         .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
         .image = texture->image,
         .viewType = VK_IMAGE_VIEW_TYPE_2D,
         .format = VK_FORMAT_R8G8B8A8_UNORM,
-        .subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
-        .subresourceRange.baseMipLevel = 0,
-        .subresourceRange.levelCount = 1,
-        .subresourceRange.baseArrayLayer = 0,
-        .subresourceRange.layerCount = 1,
+        .subresourceRange = {
+            .aspectMask     = VK_IMAGE_ASPECT_COLOR_BIT,
+            .baseMipLevel   = 0,
+            .levelCount     = mip_levels,
+            .baseArrayLayer = 0,
+            .layerCount     = 1,
+        },
     };
-    if (vkCreateImageView(vk.device, &view_ci, NULL, &texture->view) != VK_SUCCESS)
-        goto fail;
+    if (vkCreateImageView(vk.device, &view_ci, NULL, &texture->view) != VK_SUCCESS) goto fail;
+
+    /* Per-texture sampler based on TEXTURE_* flags */
+    texture->sampler = vk_create_sampler_for_flags(flags);
+    if (!texture->sampler) goto fail;
 
     VkDescriptorSetAllocateInfo desc_alloc = {
         .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
@@ -1059,23 +1162,23 @@ static bool create_vulkan_texture_resource(vulkan_texture_t *texture,
 
     VkDescriptorImageInfo image_info = {
         .imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-        .imageView = texture->view,
-        .sampler = vk.texture_sampler,
+        .imageView   = texture->view,
+        .sampler     = texture->sampler,   /* per-texture sampler */
     };
     VkWriteDescriptorSet write = {
         .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
         .dstSet = texture->descriptor_set,
-        .dstBinding = 0,
-        .dstArrayElement = 0,
+        .dstBinding = 0, .dstArrayElement = 0,
         .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
         .descriptorCount = 1,
         .pImageInfo = &image_info,
     };
     vkUpdateDescriptorSets(vk.device, 1, &write, 0, NULL);
 
-    texture->width = w;
-    texture->height = h;
-    texture->alive = true;
+    texture->width      = w;
+    texture->height     = h;
+    texture->mip_levels = mip_levels;
+    texture->alive      = true;
     vkDestroyBuffer(vk.device, staging, NULL);
     vkFreeMemory(vk.device, staging_memory, NULL);
     return true;

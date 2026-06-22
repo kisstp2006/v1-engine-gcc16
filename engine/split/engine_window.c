@@ -420,6 +420,7 @@ static bool window_create_vulkan(float scale, unsigned flags) {
         while (cook_progress() < 100) glfwPollEvents();
         cook_stop();
         vfs_reload();
+        { extern double eng_scroll_x, eng_scroll_y; eng_scroll_x = eng_scroll_y = 0; }
         profiler_init();
         audio_init(0);
         network_init();

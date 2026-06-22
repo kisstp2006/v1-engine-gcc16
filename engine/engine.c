@@ -25977,9 +25977,16 @@ static fwk_backend_vertex sprite_backend_vertex_from_point(mat44 mvp, vec3 p, ve
     float invw = cw != 0.0f ? 1.0f / cw : 1.0f;
     float z = cz * invw;
 
+    float ndx = cx * invw;
+    float ndy = -(cy * invw);
+    float half_px_x = 1.0f / (float)window_width();
+    float half_px_y = 1.0f / (float)window_height();
+    ndx = floorf(ndx / half_px_x + 0.5f) * half_px_x;
+    ndy = floorf(ndy / half_px_y + 0.5f) * half_px_y;
+
     return (fwk_backend_vertex) {
-        cx * invw,
-        -(cy * invw),
+        ndx,
+        ndy,
         z * 0.5f + 0.5f,
         uv.x, uv.y,
         ((rgba >>  0) & 255) / 255.f,
@@ -26034,22 +26041,41 @@ static void sprite_backend_emit_sprite(mat44 mvp, fwk_backend_texture_t texture,
     g_render_api->draw_textured_quad(texture, quad);
 }
 
+typedef struct { fwk_backend_texture_t tex; sprite_static_t s; } vk_zsprite_t;
+
+static int vk_zsprite_cmp(const void *a, const void *b) {
+    float za = ((const vk_zsprite_t*)a)->s.pz;
+    float zb = ((const vk_zsprite_t*)b)->s.pz;
+    return za < zb ? -1 : za > zb ? 1 : 0;
+}
+
 static void sprite_backend_render_group(batch_group_t *sprites, float mvp[16], bool centered) {
     if( map_count(*sprites) <= 0 ) return;
 
-    for each_map_ptr(*sprites, int,texture_id, batch_t,bt) {
+    static array(vk_zsprite_t) all_sprites = 0;
+    array_resize(all_sprites, 0);
+
+    for each_map_ptr(*sprites, int, texture_id, batch_t, bt) {
         int count = array_count(bt->sprites);
         if( !count ) continue;
-
-        fwk_backend_texture_t texture = (fwk_backend_texture_t)(uint32_t)*texture_id;
-        array_foreach_ptr(bt->sprites, sprite_static_t,it ) {
-            sprite_backend_emit_sprite(mvp, texture, it, centered);
+        fwk_backend_texture_t tex = (fwk_backend_texture_t)(uint32_t)*texture_id;
+        for(int i = 0; i < count; i++) {
+            vk_zsprite_t zs = { tex, bt->sprites[i] };
+            array_push(all_sprites, zs);
         }
-
-        sprite_count += count;
         array_clear(bt->sprites);
         bt->dirty = 0;
     }
+
+    int total = array_count(all_sprites);
+    if( !total ) return;
+
+    qsort(all_sprites, total, sizeof(vk_zsprite_t), vk_zsprite_cmp);
+
+    for(int i = 0; i < total; i++)
+        sprite_backend_emit_sprite(mvp, all_sprites[i].tex, &all_sprites[i].s, centered);
+
+    sprite_count += total;
 }
 
 static void sprite_flush_backend(void) {
@@ -26059,7 +26085,7 @@ static void sprite_flush_backend(void) {
     if( g_render_api->set_blend )
         g_render_api->set_blend(true);
     if( g_render_api->set_depth )
-        g_render_api->set_depth(true, true);
+        g_render_api->set_depth(true, false); /* depth test ON, write OFF — painter's algorithm */
 
     mat44 mvp3d; multiply44x2(mvp3d, camera_get_active()->proj, camera_get_active()->view);
     sprite_backend_render_group(&sprite_group[SPRITE_PROJECTED], mvp3d, false);
@@ -30122,6 +30148,7 @@ static bool window_create_vulkan(float scale, unsigned flags) {
     while (cook_progress() < 100) glfwPollEvents();
     cook_stop();
     vfs_reload();
+    eng_scroll_x = eng_scroll_y = 0; /* discard scroll events accumulated during cook wait */
     profiler_init();
     audio_init(0);
     network_init();
