@@ -772,11 +772,35 @@ int window_frame_begin() {
     #endif
 
     #if ENABLE_VULKAN
-        /* NK new_frame: nk_glfw_vk_new_frame() called from 3rd_nuklear_glfw_vk.h */
         if( g_render_api && g_render_api->begin_frame && !g_render_api->begin_frame() ) return 0;
         if( g_render_api && g_render_api->clear )
             g_render_api->clear(winbgcolor.r, winbgcolor.g, winbgcolor.b,
                                 window_has_transparent() ? 0 : winbgcolor.a);
+        /* NK new_frame: reads eng_scroll_x/y BEFORE input_update() resets them */
+        ui_create();
+
+        /* Debug panel — same as GL path */
+        #if !ENABLE_RETAIL
+        {
+            bool has_menu = ui_has_menubar();
+            bool may_render_debug_panel = 1;
+            if( have_tools() ) {
+                static int cook_has_progressbar_vk; do_once cook_has_progressbar_vk = !COOK_ON_DEMAND;
+                if( cook_has_progressbar_vk ) {
+                    static unsigned frames_vk = 0; if(frames_vk <= 0) frames_vk += cook_progress() >= 100;
+                    may_render_debug_panel = (frames_vk > 0);
+                }
+            }
+            if (!win_debug_visible) may_render_debug_panel = 0;
+            if( may_render_debug_panel ) {
+                if( has_menu ? ui_window("Debug " ICON_MD_SETTINGS, 0) : ui_panel("Debug " ICON_MD_SETTINGS, 0) ) {
+                    ui_engine();
+                    (has_menu ? ui_window_end : ui_panel_end)();
+                }
+                API int engine_tick(); engine_tick();
+            }
+        }
+        #endif
     #endif
         void input_update();
         input_update();
@@ -868,6 +892,9 @@ void window_frame_end() {
         ddraw_flush();
         ddraw_ontop(1);
         ddraw_flush();
+        /* ui_render() updates hover/active state and queues NK notify/menu draws.
+         * The actual NK Vulkan rendering happens via callback in engine_vulkan_end_frame(). */
+        ui_render();
     #endif
         return;
     }

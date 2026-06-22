@@ -172,6 +172,79 @@ static struct nk_glfw nk_glfw = {0};
 /* Called to wire up a Vulkan Nuklear context */
 void ui_set_context(struct nk_context *ctx) { ui_ctx = ctx; }
 
+/* Backend-agnostic font loader — called from both GL and VK paths.
+ * Returns the main UI font (for nk_style_set_font), or NULL on failure. */
+static struct nk_font* nk_add_fonts_to_atlas(struct nk_font_atlas *atlas) {
+    #define UI_ICON_MIN ICON_MD_MIN
+    #define UI_ICON_MED ICON_MD_MAX_16
+    #define UI_ICON_MAX ICON_MD_MAX
+
+    struct nk_font *font = NULL;
+    int datalen = 0;
+
+    for( char *data = vfs_load(UI_FONT_REGULAR, &datalen); data; data = 0 ) {
+        float font_size = UI_FONT_REGULAR_SIZE;
+        struct nk_font_config cfg = nk_font_config(font_size);
+        cfg.oversample_h = UI_FONT_REGULAR_SAMPLING.x;
+        cfg.oversample_v = UI_FONT_REGULAR_SAMPLING.y;
+        cfg.pixel_snap   = UI_FONT_REGULAR_SAMPLING.z;
+        #if UI_LESSER_SPACING
+        cfg.spacing.x -= 1.0;
+        #endif
+        struct nk_font *regular = nk_font_atlas_add_from_memory(atlas, data, datalen, font_size, &cfg);
+        font = regular ? regular : font;
+    }
+
+    static struct icon_font {
+        const char *file; int yspacing; vec3 sampling; nk_rune range[3];
+    } icons[] = {
+        {"MaterialIconsSharp-Regular.otf", UI_ICON_SPACING_Y, {1,1,1}, {UI_ICON_MIN, UI_ICON_MED, 0}},
+        {"materialdesignicons-webfont.ttf", 2, {1,1,1}, {0xF68C, 0xF1CC7, 0}},
+    };
+    for( int f = 0; f < countof(icons); ++f )
+    for( char *data = vfs_load(icons[f].file, &datalen); data; data = 0 ) {
+        struct nk_font_config cfg = nk_font_config(UI_ICON_FONTSIZE);
+        cfg.range = icons[f].range;
+        cfg.merge_mode = 1;
+        cfg.spacing.x += UI_ICON_SPACING_X;
+        cfg.spacing.y += icons[f].yspacing;
+        cfg.oversample_h = icons[f].sampling.x;
+        cfg.oversample_v = icons[f].sampling.y;
+        cfg.pixel_snap   = icons[f].sampling.z;
+        #if UI_LESSER_SPACING
+        cfg.spacing.x -= 1.0;
+        #endif
+        nk_font_atlas_add_from_memory(atlas, data, datalen, UI_ICON_FONTSIZE, &cfg);
+    }
+
+    for( char *data = vfs_load(UI_FONT_TERMINAL, &datalen); data; data = 0 ) {
+        const float font_size = UI_FONT_TERMINAL_SIZE;
+        static const nk_rune icon_range[] = {32, 127, 0};
+        struct nk_font_config cfg = nk_font_config(font_size);
+        cfg.range = icon_range;
+        cfg.oversample_h = UI_FONT_TERMINAL_SAMPLING.x;
+        cfg.oversample_v = UI_FONT_TERMINAL_SAMPLING.y;
+        cfg.pixel_snap   = UI_FONT_TERMINAL_SAMPLING.z;
+        #if UI_LESSER_SPACING
+        cfg.spacing.x -= 1.0;
+        #endif
+        nk_font_atlas_add_from_memory(atlas, data, datalen, font_size, &cfg);
+    }
+
+    for( char *data = vfs_load(UI_FONT_HEADING, &datalen); data; data = 0 ) {
+        struct nk_font_config cfg = nk_font_config(UI_FONT_HEADING_SIZE);
+        cfg.oversample_h = UI_FONT_HEADING_SAMPLING.x;
+        cfg.oversample_v = UI_FONT_HEADING_SAMPLING.y;
+        cfg.pixel_snap   = UI_FONT_HEADING_SAMPLING.z;
+        #if UI_LESSER_SPACING
+        cfg.spacing.x -= 1.0;
+        #endif
+        nk_font_atlas_add_from_memory(atlas, data, datalen, UI_FONT_HEADING_SIZE, &cfg);
+    }
+
+    return font;
+}
+
 #if ENABLE_VULKAN
 /* Vulkan Nuklear backend — same API style as 3rd_nuklear_glfw_gl3.h */
 #define NK_GLFW_VK_IMPLEMENTATION
@@ -184,106 +257,16 @@ void* ui_handle() {
 }
 
 static void nk_config_custom_fonts() {
-    #define UI_ICON_MIN ICON_MD_MIN
-    #define UI_ICON_MED ICON_MD_MAX_16
-    #define UI_ICON_MAX ICON_MD_MAX
-
-    #define ICON_BARS        ICON_MD_MENU
-    #define ICON_FILE        ICON_MD_INSERT_DRIVE_FILE
-    #define ICON_TRASH       ICON_MD_DELETE
+    #define ICON_BARS  ICON_MD_MENU
+    #define ICON_FILE  ICON_MD_INSERT_DRIVE_FILE
+    #define ICON_TRASH ICON_MD_DELETE
 
     struct nk_font *font = NULL;
     struct nk_font_atlas *atlas = NULL;
-    nk_glfw3_font_stash_begin(&nk_glfw, &atlas); // nk_sdl_font_stash_begin(&atlas);
-
-        // Default font(#1)...
-        int datalen = 0;
-        for( char *data = vfs_load(UI_FONT_REGULAR, &datalen); data; data = 0 ) {
-            float font_size = UI_FONT_REGULAR_SIZE;
-                struct nk_font_config cfg = nk_font_config(font_size);
-                cfg.oversample_h = UI_FONT_REGULAR_SAMPLING.x;
-                cfg.oversample_v = UI_FONT_REGULAR_SAMPLING.y;
-                cfg.pixel_snap   = UI_FONT_REGULAR_SAMPLING.z;
-                #if UI_LESSER_SPACING
-                cfg.spacing.x -= 1.0;
-                #endif
-            // win32: struct nk_font *arial = nk_font_atlas_add_from_file(atlas, va("%s/fonts/arial.ttf",getenv("windir")), font_size, &cfg); font = arial ? arial : font;
-            // struct nk_font *droid = nk_font_atlas_add_from_file(atlas, "nuklear/extra_font/DroidSans.ttf", font_size, &cfg); font = droid ? droid : font;
-            struct nk_font *regular = nk_font_atlas_add_from_memory(atlas, data, datalen, font_size, &cfg); font = regular ? regular : font;
-        }
-
-        // ...with icons embedded on it.
-        static struct icon_font {
-            const char *file; int yspacing; vec3 sampling; nk_rune range[3];
-        } icons[] = {
-            {"MaterialIconsSharp-Regular.otf", UI_ICON_SPACING_Y, {1,1,1}, {UI_ICON_MIN, UI_ICON_MED /*MAX*/, 0}}, // "MaterialIconsOutlined-Regular.otf" "MaterialIcons-Regular.ttf"
-            {"materialdesignicons-webfont.ttf", 2, {1,1,1}, {0xF68C /*ICON_MDI_MIN*/, 0xF1CC7/*ICON_MDI_MAX*/, 0}},
-        };
-        for( int f = 0; f < countof(icons); ++f )
-        for( char *data = vfs_load(icons[f].file, &datalen); data; data = 0 ) {
-            struct nk_font_config cfg = nk_font_config(UI_ICON_FONTSIZE);
-            cfg.range = icons[f].range; // nk_font_default_glyph_ranges();
-            cfg.merge_mode = 1;
-
-            cfg.spacing.x += UI_ICON_SPACING_X;
-            cfg.spacing.y += icons[f].yspacing;
-         // cfg.font->ascent += ICON_ASCENT;
-         // cfg.font->height += ICON_HEIGHT;
-
-            cfg.oversample_h = icons[f].sampling.x;
-            cfg.oversample_v = icons[f].sampling.y;
-            cfg.pixel_snap   = icons[f].sampling.z;
-
-            #if UI_LESSER_SPACING
-            cfg.spacing.x -= 1.0;
-            #endif
-
-            struct nk_font *icons = nk_font_atlas_add_from_memory(atlas, data, datalen, UI_ICON_FONTSIZE, &cfg);
-        }
-
-        // Monospaced font. Used in terminals or consoles.
-
-        for( char *data = vfs_load(UI_FONT_TERMINAL, &datalen); data; data = 0 ) {
-            const float font_size = UI_FONT_TERMINAL_SIZE;
-            static const nk_rune icon_range[] = {32, 127, 0};
-
-            struct nk_font_config cfg = nk_font_config(font_size);
-            cfg.range = icon_range;
-
-            cfg.oversample_h = UI_FONT_TERMINAL_SAMPLING.x;
-            cfg.oversample_v = UI_FONT_TERMINAL_SAMPLING.y;
-            cfg.pixel_snap   = UI_FONT_TERMINAL_SAMPLING.z;
-
-            #if UI_LESSER_SPACING
-            cfg.spacing.x -= 1.0;
-            #endif
-
-            // struct nk_font *proggy = nk_font_atlas_add_default(atlas, font_size, &cfg);
-            struct nk_font *bold = nk_font_atlas_add_from_memory(atlas, data, datalen, font_size, &cfg);
-        }
-
-        // Extra optional fonts from here...
-
-        for( char *data = vfs_load(UI_FONT_HEADING, &datalen); data; data = 0 ) {
-            struct nk_font_config cfg = nk_font_config(UI_FONT_HEADING_SIZE);
-            cfg.oversample_h = UI_FONT_HEADING_SAMPLING.x;
-            cfg.oversample_v = UI_FONT_HEADING_SAMPLING.y;
-            cfg.pixel_snap   = UI_FONT_HEADING_SAMPLING.z;
-
-            #if UI_LESSER_SPACING
-            cfg.spacing.x -= 1.0;
-            #endif
-
-            struct nk_font *bold = nk_font_atlas_add_from_memory(atlas, data, datalen, UI_FONT_HEADING_SIZE, &cfg);
-            // font = bold ? bold : font;
-        }
-
-    nk_glfw3_font_stash_end(&nk_glfw); // nk_sdl_font_stash_end();
-//  ASSERT(font);
+    nk_glfw3_font_stash_begin(&nk_glfw, &atlas);
+    font = nk_add_fonts_to_atlas(atlas);
+    nk_glfw3_font_stash_end(&nk_glfw);
     if(font) nk_style_set_font(ui_ctx, &font->handle);
-
-    // Load Cursor: if you uncomment cursor loading please hide the cursor
-    // nk_style_load_all_cursors(ctx, atlas->cursors); glfwSetInputMode(win, GLFW_CURSOR, GLFW_CURSOR_HIDDEN);
 }
 
 static void nk_config_custom_theme() {
@@ -979,6 +962,7 @@ void ui_create() {
     /* Lazy-init Nuklear VK on first frame; engine_vulkan_nk_is_ready() is false in GL mode */
     if( engine_vulkan_nk_is_ready() && !nk_glfw_vk.win ) {
         ui_ctx = nk_glfw_vk_init(&nk_glfw_vk, (GLFWwindow*)window_handle());
+        if( ui_ctx ) nk_config_custom_theme(); /* apply dark theme (uses ui_ctx) */
     }
 #endif
 
@@ -1074,12 +1058,23 @@ void ui_render() {
     //nk_sdl_render(NK_ANTI_ALIASING_ON, MAX_VERTEX_MEMORY, MAX_ELEMENT_MEMORY);
 
     if (!ui_hidden) {
-        GLfloat bkColor[4]; glGetFloatv(GL_COLOR_CLEAR_VALUE, bkColor); // @transparent
-        glClearColor(0,0,0,1); // @transparent
-        glColorMask(GL_TRUE,GL_TRUE,GL_TRUE,/*bkColor[3] ? GL_FALSE :*/ GL_TRUE);  // @transparent
-        nk_glfw3_render(&nk_glfw, NK_ANTI_ALIASING_ON, MAX_VERTEX_MEMORY, MAX_ELEMENT_MEMORY);
-        glColorMask(GL_TRUE,GL_TRUE,GL_TRUE,GL_TRUE);  // @transparent
+#if ENABLE_VULKAN
+        if( !engine_vulkan_nk_is_ready() )  /* GL path only */
+#endif
+        {
+            GLfloat bkColor[4]; glGetFloatv(GL_COLOR_CLEAR_VALUE, bkColor); // @transparent
+            glClearColor(0,0,0,1); // @transparent
+            glColorMask(GL_TRUE,GL_TRUE,GL_TRUE,/*bkColor[3] ? GL_FALSE :*/ GL_TRUE);  // @transparent
+            nk_glfw3_render(&nk_glfw, NK_ANTI_ALIASING_ON, MAX_VERTEX_MEMORY, MAX_ELEMENT_MEMORY);
+            glColorMask(GL_TRUE,GL_TRUE,GL_TRUE,GL_TRUE);  // @transparent
+        }
+        /* Vulkan: NK draw commands queued; render callback fires in engine_vulkan_end_frame() */
     } else {
+#if ENABLE_VULKAN
+        if( engine_vulkan_nk_is_ready() )
+            nk_clear(&nk_glfw_vk.ctx);
+        else
+#endif
         nk_clear(&nk_glfw.ctx);
     }
 

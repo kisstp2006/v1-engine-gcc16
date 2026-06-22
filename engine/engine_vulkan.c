@@ -1426,10 +1426,12 @@ static bool create_swapchain(void) {
     }
     VkSurfaceCapabilitiesKHR caps = support.capabilities;
 
-    /* Format: prefer B8G8R8A8_SRGB + SRGB_NONLINEAR */
+    /* Format: prefer B8G8R8A8_UNORM + SRGB_NONLINEAR to match the GL path,
+     * which runs without GL_FRAMEBUFFER_SRGB (linear output, no gamma encode).
+     * Using sRGB swapchain would double-encode sRGB textures, making colors lighter. */
     VkSurfaceFormatKHR chosen = support.formats[0];
     for (uint32_t i = 0; i < support.format_count; i++) {
-        if (support.formats[i].format == VK_FORMAT_B8G8R8A8_SRGB &&
+        if (support.formats[i].format == VK_FORMAT_B8G8R8A8_UNORM &&
             support.formats[i].colorSpace == VK_COLOR_SPACE_SRGB_NONLINEAR_KHR) {
             chosen = support.formats[i];
             break;

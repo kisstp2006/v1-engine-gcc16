@@ -117,10 +117,12 @@ static struct nk_context *nk_glfw_vk_init(struct nk_glfw_vk *glfw, GLFWwindow *w
     glfw->win = win;
     glfwGetWindowSize(win, &glfw->width, &glfw->height);
 
-    /* Font atlas */
+    /* Font atlas — load same fonts as GL path via nk_add_fonts_to_atlas() */
     nk_font_atlas_init_default(&glfw->atlas);
     nk_font_atlas_begin(&glfw->atlas);
-    struct nk_font *font = nk_font_atlas_add_default(&glfw->atlas, 13.0f, NULL);
+    /* nk_add_fonts_to_atlas() is defined in engine_ui.c before this header */
+    struct nk_font *font = nk_add_fonts_to_atlas(&glfw->atlas);
+    if (!font) font = nk_font_atlas_add_default(&glfw->atlas, 13.0f, NULL);
     int aw, ah;
     const void *pixels = nk_font_atlas_bake(&glfw->atlas, &aw, &ah, NK_FONT_ATLAS_RGBA32);
 
