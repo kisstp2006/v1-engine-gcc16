@@ -169,6 +169,16 @@ static int ui_using_v2_menubar = 0;
 static struct nk_context *ui_ctx;
 static struct nk_glfw nk_glfw = {0};
 
+/* Called to wire up a Vulkan Nuklear context */
+void ui_set_context(struct nk_context *ctx) { ui_ctx = ctx; }
+
+#if ENABLE_VULKAN
+/* Vulkan Nuklear backend — same API style as 3rd_nuklear_glfw_gl3.h */
+#define NK_GLFW_VK_IMPLEMENTATION
+#include "3rd_nuklear_glfw_vk.h"
+static struct nk_glfw_vk nk_glfw_vk = {0};
+#endif
+
 void* ui_handle() {
     return ui_ctx;
 }
@@ -965,7 +975,19 @@ static
 void ui_create() {
     do_once atexit(ui_destroy);
 
+#if ENABLE_VULKAN
+    /* Lazy-init Nuklear VK on first frame; engine_vulkan_nk_is_ready() is false in GL mode */
+    if( engine_vulkan_nk_is_ready() && !nk_glfw_vk.win ) {
+        ui_ctx = nk_glfw_vk_init(&nk_glfw_vk, (GLFWwindow*)window_handle());
+    }
+#endif
+
     if( ui_dirty ) {
+#if ENABLE_VULKAN
+        if( nk_glfw_vk.win )
+            nk_glfw_vk_new_frame(&nk_glfw_vk);
+        else
+#endif
         nk_glfw3_new_frame(&nk_glfw); //g->nk_glfw);
         ui_dirty = 0;
 

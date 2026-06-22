@@ -43,12 +43,58 @@ extern const char** glfwGetRequiredInstanceExtensions(uint32_t* count);
 extern int    glfwCreateWindowSurface(VkInstance instance, GLFWwindow* window,
                                       const VkAllocationCallbacks* alloc,
                                       VkSurfaceKHR* surface);
+/* Additional GLFW decls needed for Nuklear input */
+extern int    glfwGetKey(GLFWwindow* window, int key);
+extern int    glfwGetMouseButton(GLFWwindow* window, int button);
+extern void   glfwGetCursorPos(GLFWwindow* window, double* xpos, double* ypos);
+extern int    glfwGetWindowSize(GLFWwindow* window, int* w, int* h);
+extern int    glfwGetInputMode(GLFWwindow* window, int mode);
+typedef void (*GLFWcharfun)(GLFWwindow*, unsigned int);
+extern GLFWcharfun glfwSetCharCallback(GLFWwindow* window, GLFWcharfun cbfun);
+typedef void (*GLFWscrollfun)(GLFWwindow*, double, double);
+extern GLFWscrollfun glfwSetScrollCallback(GLFWwindow* window, GLFWscrollfun cbfun);
+extern void*  glfwGetWindowUserPointer(GLFWwindow* window);
+extern void   glfwSetWindowUserPointer(GLFWwindow* window, void* pointer);
 /* GLFW window hint constants needed for Vulkan */
 #ifndef GLFW_CLIENT_API
 #  define GLFW_CLIENT_API 0x00022001
 #  define GLFW_NO_API     0
 #  define GLFW_RESIZABLE  0x00020003
 #endif
+/* GLFW key/action constants for Nuklear input */
+#ifndef GLFW_PRESS
+#  define GLFW_PRESS    1
+#  define GLFW_RELEASE  0
+#endif
+#ifndef GLFW_KEY_ENTER
+#  define GLFW_KEY_BACKSPACE  259
+#  define GLFW_KEY_DELETE     261
+#  define GLFW_KEY_ENTER      257
+#  define GLFW_KEY_TAB        258
+#  define GLFW_KEY_UP         265
+#  define GLFW_KEY_DOWN       264
+#  define GLFW_KEY_LEFT       263
+#  define GLFW_KEY_RIGHT      262
+#  define GLFW_KEY_HOME       268
+#  define GLFW_KEY_END        269
+#  define GLFW_KEY_PAGE_UP    266
+#  define GLFW_KEY_PAGE_DOWN  267
+#  define GLFW_KEY_LEFT_SHIFT    340
+#  define GLFW_KEY_RIGHT_SHIFT   344
+#  define GLFW_KEY_LEFT_CONTROL  341
+#  define GLFW_KEY_RIGHT_CONTROL 345
+#  define GLFW_KEY_C  67
+#  define GLFW_KEY_V  86
+#  define GLFW_KEY_X  88
+#  define GLFW_KEY_Z  90
+#  define GLFW_MOUSE_BUTTON_LEFT   0
+#  define GLFW_MOUSE_BUTTON_MIDDLE 2
+#  define GLFW_MOUSE_BUTTON_RIGHT  1
+#  define GLFW_CURSOR        0x00033001
+#  define GLFW_CURSOR_NORMAL 0x00034001
+#endif
+
+/* (Nuklear types stay in engine.c via NK_IMPLEMENTATION — not needed here) */
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -252,6 +298,85 @@ static const uint32_t g_textured_frag_spv[] = {
 };
 static const size_t g_textured_frag_spv_size = sizeof(g_textured_frag_spv);
 
+/* ── Nuklear SPIR-V (2D UI rendering) ───────────────────────────────────────
+ * Source GLSL: nk.vert / nk.frag  (position+uv+color → mat4 push constant)
+ * Re-compile:  glslc nk.vert -o nk.vert.spv && glslc nk.frag -o nk.frag.spv */
+static const uint32_t g_nk_vert_spv[] = {
+    0x07230203u,0x00010000u,0x000D000Bu,0x0000002Bu,0x00000000u,0x00020011u,0x00000001u,0x0006000Bu,
+    0x00000001u,0x4C534C47u,0x6474732Eu,0x3035342Eu,0x00000000u,0x0003000Eu,0x00000000u,0x00000001u,
+    0x000B000Fu,0x00000000u,0x00000004u,0x6E69616Du,0x00000000u,0x00000009u,0x0000000Bu,0x0000000Fu,
+    0x00000011u,0x00000018u,0x00000022u,0x00030003u,0x00000002u,0x000001C2u,0x000A0004u,0x475F4C47u,
+    0x4C474F4Fu,0x70635F45u,0x74735F70u,0x5F656C79u,0x656E696Cu,0x7269645Fu,0x69746365u,0x00006576u,
+    0x00080004u,0x475F4C47u,0x4C474F4Fu,0x6E695F45u,0x64756C63u,0x69645F65u,0x74636572u,0x00657669u,
+    0x00040005u,0x00000004u,0x6E69616Du,0x00000000u,0x00040005u,0x00000009u,0x5F74756Fu,0x00007675u,
+    0x00040005u,0x0000000Bu,0x755F6E69u,0x00000076u,0x00050005u,0x0000000Fu,0x5F74756Fu,0x6F6C6F63u,
+    0x00000072u,0x00050005u,0x00000011u,0x635F6E69u,0x726F6C6Fu,0x00000000u,0x00060005u,0x00000016u,
+    0x505F6C67u,0x65567265u,0x78657472u,0x00000000u,0x00060006u,0x00000016u,0x00000000u,0x505F6C67u,
+    0x7469736Fu,0x006E6F69u,0x00070006u,0x00000016u,0x00000001u,0x505F6C67u,0x746E696Fu,0x657A6953u,
+    0x00000000u,0x00070006u,0x00000016u,0x00000002u,0x435F6C67u,0x4470696Cu,0x61747369u,0x0065636Eu,
+    0x00070006u,0x00000016u,0x00000003u,0x435F6C67u,0x446C6C75u,0x61747369u,0x0065636Eu,0x00030005u,
+    0x00000018u,0x00000000u,0x00030005u,0x0000001Cu,0x00004350u,0x00050006u,0x0000001Cu,0x00000000u,
+    0x6A6F7270u,0x00000000u,0x00030005u,0x0000001Eu,0x00006370u,0x00040005u,0x00000022u,0x705F6E69u,
+    0x0000736Fu,0x00040047u,0x00000009u,0x0000001Eu,0x00000000u,0x00040047u,0x0000000Bu,0x0000001Eu,
+    0x00000001u,0x00040047u,0x0000000Fu,0x0000001Eu,0x00000001u,0x00040047u,0x00000011u,0x0000001Eu,
+    0x00000002u,0x00030047u,0x00000016u,0x00000002u,0x00050048u,0x00000016u,0x00000000u,0x0000000Bu,
+    0x00000000u,0x00050048u,0x00000016u,0x00000001u,0x0000000Bu,0x00000001u,0x00050048u,0x00000016u,
+    0x00000002u,0x0000000Bu,0x00000003u,0x00050048u,0x00000016u,0x00000003u,0x0000000Bu,0x00000004u,
+    0x00030047u,0x0000001Cu,0x00000002u,0x00040048u,0x0000001Cu,0x00000000u,0x00000005u,0x00050048u,
+    0x0000001Cu,0x00000000u,0x00000007u,0x00000010u,0x00050048u,0x0000001Cu,0x00000000u,0x00000023u,
+    0x00000000u,0x00040047u,0x00000022u,0x0000001Eu,0x00000000u,0x00020013u,0x00000002u,0x00030021u,
+    0x00000003u,0x00000002u,0x00030016u,0x00000006u,0x00000020u,0x00040017u,0x00000007u,0x00000006u,
+    0x00000002u,0x00040020u,0x00000008u,0x00000003u,0x00000007u,0x0004003Bu,0x00000008u,0x00000009u,
+    0x00000003u,0x00040020u,0x0000000Au,0x00000001u,0x00000007u,0x0004003Bu,0x0000000Au,0x0000000Bu,
+    0x00000001u,0x00040017u,0x0000000Du,0x00000006u,0x00000004u,0x00040020u,0x0000000Eu,0x00000003u,
+    0x0000000Du,0x0004003Bu,0x0000000Eu,0x0000000Fu,0x00000003u,0x00040020u,0x00000010u,0x00000001u,
+    0x0000000Du,0x0004003Bu,0x00000010u,0x00000011u,0x00000001u,0x00040015u,0x00000013u,0x00000020u,
+    0x00000000u,0x0004002Bu,0x00000013u,0x00000014u,0x00000001u,0x0004001Cu,0x00000015u,0x00000006u,
+    0x00000014u,0x0006001Eu,0x00000016u,0x0000000Du,0x00000006u,0x00000015u,0x00000015u,0x00040020u,
+    0x00000017u,0x00000003u,0x00000016u,0x0004003Bu,0x00000017u,0x00000018u,0x00000003u,0x00040015u,
+    0x00000019u,0x00000020u,0x00000001u,0x0004002Bu,0x00000019u,0x0000001Au,0x00000000u,0x00040018u,
+    0x0000001Bu,0x0000000Du,0x00000004u,0x0003001Eu,0x0000001Cu,0x0000001Bu,0x00040020u,0x0000001Du,
+    0x00000009u,0x0000001Cu,0x0004003Bu,0x0000001Du,0x0000001Eu,0x00000009u,0x00040020u,0x0000001Fu,
+    0x00000009u,0x0000001Bu,0x0004003Bu,0x0000000Au,0x00000022u,0x00000001u,0x0004002Bu,0x00000006u,
+    0x00000024u,0x00000000u,0x0004002Bu,0x00000006u,0x00000025u,0x3F800000u,0x00050036u,0x00000002u,
+    0x00000004u,0x00000000u,0x00000003u,0x000200F8u,0x00000005u,0x0004003Du,0x00000007u,0x0000000Cu,
+    0x0000000Bu,0x0003003Eu,0x00000009u,0x0000000Cu,0x0004003Du,0x0000000Du,0x00000012u,0x00000011u,
+    0x0003003Eu,0x0000000Fu,0x00000012u,0x00050041u,0x0000001Fu,0x00000020u,0x0000001Eu,0x0000001Au,
+    0x0004003Du,0x0000001Bu,0x00000021u,0x00000020u,0x0004003Du,0x00000007u,0x00000023u,0x00000022u,
+    0x00050051u,0x00000006u,0x00000026u,0x00000023u,0x00000000u,0x00050051u,0x00000006u,0x00000027u,
+    0x00000023u,0x00000001u,0x00070050u,0x0000000Du,0x00000028u,0x00000026u,0x00000027u,0x00000024u,
+    0x00000025u,0x00050091u,0x0000000Du,0x00000029u,0x00000021u,0x00000028u,0x00050041u,0x0000000Eu,
+    0x0000002Au,0x00000018u,0x0000001Au,0x0003003Eu,0x0000002Au,0x00000029u,0x000100FDu,0x00010038u,
+};
+static const size_t g_nk_vert_spv_size = sizeof(g_nk_vert_spv);
+
+static const uint32_t g_nk_frag_spv[] = {
+    0x07230203u,0x00010000u,0x000D000Bu,0x00000018u,0x00000000u,0x00020011u,0x00000001u,0x0006000Bu,
+    0x00000001u,0x4C534C47u,0x6474732Eu,0x3035342Eu,0x00000000u,0x0003000Eu,0x00000000u,0x00000001u,
+    0x0008000Fu,0x00000004u,0x00000004u,0x6E69616Du,0x00000000u,0x00000009u,0x0000000Bu,0x00000014u,
+    0x00030010u,0x00000004u,0x00000007u,0x00030003u,0x00000002u,0x000001C2u,0x000A0004u,0x475F4C47u,
+    0x4C474F4Fu,0x70635F45u,0x74735F70u,0x5F656C79u,0x656E696Cu,0x7269645Fu,0x69746365u,0x00006576u,
+    0x00080004u,0x475F4C47u,0x4C474F4Fu,0x6E695F45u,0x64756C63u,0x69645F65u,0x74636572u,0x00657669u,
+    0x00040005u,0x00000004u,0x6E69616Du,0x00000000u,0x00050005u,0x00000009u,0x5F74756Fu,0x6F6C6F63u,
+    0x00000072u,0x00050005u,0x0000000Bu,0x635F6E69u,0x726F6C6Fu,0x00000000u,0x00030005u,0x00000010u,
+    0x00786574u,0x00040005u,0x00000014u,0x755F6E69u,0x00000076u,0x00040047u,0x00000009u,0x0000001Eu,
+    0x00000000u,0x00040047u,0x0000000Bu,0x0000001Eu,0x00000001u,0x00040047u,0x00000010u,0x00000021u,
+    0x00000000u,0x00040047u,0x00000010u,0x00000022u,0x00000000u,0x00040047u,0x00000014u,0x0000001Eu,
+    0x00000000u,0x00020013u,0x00000002u,0x00030021u,0x00000003u,0x00000002u,0x00030016u,0x00000006u,
+    0x00000020u,0x00040017u,0x00000007u,0x00000006u,0x00000004u,0x00040020u,0x00000008u,0x00000003u,
+    0x00000007u,0x0004003Bu,0x00000008u,0x00000009u,0x00000003u,0x00040020u,0x0000000Au,0x00000001u,
+    0x00000007u,0x0004003Bu,0x0000000Au,0x0000000Bu,0x00000001u,0x00090019u,0x0000000Du,0x00000006u,
+    0x00000001u,0x00000000u,0x00000000u,0x00000000u,0x00000001u,0x00000000u,0x0003001Bu,0x0000000Eu,
+    0x0000000Du,0x00040020u,0x0000000Fu,0x00000000u,0x0000000Eu,0x0004003Bu,0x0000000Fu,0x00000010u,
+    0x00000000u,0x00040017u,0x00000012u,0x00000006u,0x00000002u,0x00040020u,0x00000013u,0x00000001u,
+    0x00000012u,0x0004003Bu,0x00000013u,0x00000014u,0x00000001u,0x00050036u,0x00000002u,0x00000004u,
+    0x00000000u,0x00000003u,0x000200F8u,0x00000005u,0x0004003Du,0x00000007u,0x0000000Cu,0x0000000Bu,
+    0x0004003Du,0x0000000Eu,0x00000011u,0x00000010u,0x0004003Du,0x00000012u,0x00000015u,0x00000014u,
+    0x00050057u,0x00000007u,0x00000016u,0x00000011u,0x00000015u,0x00050085u,0x00000007u,0x00000017u,
+    0x0000000Cu,0x00000016u,0x0003003Eu,0x00000009u,0x00000017u,0x000100FDu,0x00010038u,
+};
+static const size_t g_nk_frag_spv_size = sizeof(g_nk_frag_spv);
+
 #define VK_MAX_FRAMES_IN_FLIGHT       2
 #define VK_DESCRIPTOR_POOL_CAPACITY   1024   /* max simultaneously loaded textures */
 #define VK_INITIAL_VERTEX_CAPACITY    1024   /* starting CPU-side vertex queue size */
@@ -354,6 +479,23 @@ static struct {
     vulkan_texture_t     *textures;
     uint32_t              texture_capacity;
     fwk_backend_texture_t white_texture;
+
+    /* ── Nuklear Vulkan UI state (no NK types here — they live in 3rd_nuklear_glfw_vk.h) ── */
+    struct {
+        GLFWwindow                  *win;
+        unsigned int                 text_buf[256]; /* char input, fed by vk_nk_char_cb */
+        int                          text_len;
+        VkBuffer                     vbuf[VK_MAX_FRAMES_IN_FLIGHT];
+        VkDeviceMemory               vmem[VK_MAX_FRAMES_IN_FLIGHT];
+        VkBuffer                     ibuf[VK_MAX_FRAMES_IN_FLIGHT];
+        VkDeviceMemory               imem[VK_MAX_FRAMES_IN_FLIGHT];
+        VkPipeline                   pipeline;
+        VkPipelineLayout             layout;
+        VkShaderModule               vert;
+        VkShaderModule               frag;
+        bool                         initialized;
+    } nk;
+
     bool                  initialized;
 } vk;
 
@@ -966,6 +1108,12 @@ static bool has_vulkan_state(void) {
 }
 
 static void cleanup_vulkan_objects(bool wait_idle);
+/* NK pipeline helpers — defined later in the NK section */
+static bool vk_nk_create_pipeline(void);
+static void vk_nk_destroy_pipeline(void);
+/* Texture helpers — defined later in the texture section */
+static fwk_backend_texture_t engine_vulkan_create_texture(unsigned,unsigned,unsigned,const void*,int);
+static fwk_backend_texture_t engine_vulkan_white_texture(void);
 
 /* ── Instance creation ───────────────────────────────────────────────────── */
 
@@ -1635,6 +1783,8 @@ static void destroy_swapchain_resources(void) {
     vk.textured_pipeline_layout = VK_NULL_HANDLE;
     vk.textured_vert_module = VK_NULL_HANDLE;
     vk.textured_frag_module = VK_NULL_HANDLE;
+    /* Rebuild NK pipeline on swapchain recreate (viewport/extent changes) */
+    if (vk.nk.initialized) vk_nk_destroy_pipeline();
     vk.images = NULL;
     vk.image_views = NULL;
     vk.framebuffers = NULL;
@@ -1650,6 +1800,8 @@ static bool create_swapchain_resources(void) {
     if (!create_primitive_pipeline()) goto fail;
     if (!create_textured_pipeline()) goto fail;
     if (!create_framebuffers())   goto fail;
+    /* Rebuild NK pipeline after swapchain recreate */
+    if (vk.nk.initialized && !vk_nk_create_pipeline()) goto fail;
     return true;
 
 fail:
@@ -1789,6 +1941,221 @@ static bool create_command_infra(void) {
     return true;
 }
 
+/* ══════════════════════════════════════════════════════════════════════════ */
+/* ── Nuklear Vulkan UI                                                     ── */
+/* ══════════════════════════════════════════════════════════════════════════ */
+/*
+ * NK code that needs Nuklear types lives in 3rd_nuklear_glfw_vk.h (included
+ * by engine.c where NK_IMPLEMENTATION is available).  engine_vulkan.c only
+ * provides raw Vulkan resources + a render-callback slot so the NK render
+ * function can be called from inside the active render pass.
+ */
+
+/* Nuklear vertex layout — 20 bytes, identical to nk_glfw_vertex */
+typedef struct { float pos[2]; float uv[2]; unsigned char col[4]; } vk_nk_vertex_t;
+#define VK_NK_VERTEX_BYTES  (512u * 1024u)   /* 512 KB */
+#define VK_NK_INDEX_BYTES   (128u * 1024u)   /* 128 KB  (uint16 indices) */
+
+/* GLFW char callback — stores codepoints; consumed by 3rd_nuklear_glfw_vk.h */
+static void vk_nk_char_cb(GLFWwindow *w, unsigned int cp) {
+    (void)w;
+    if (vk.nk.text_len < 256) vk.nk.text_buf[vk.nk.text_len++] = cp;
+}
+
+/* Render callback — set by 3rd_nuklear_glfw_vk.h, called inside end_frame */
+static void (*s_nk_render_fn)(void) = NULL;
+/* Current command buffer, valid only while s_nk_render_fn is executing */
+static VkCommandBuffer s_nk_cmd = VK_NULL_HANDLE;
+
+void engine_vulkan_set_nk_render_fn(void (*fn)(void)) { s_nk_render_fn = fn; }
+
+/* ── NK per-frame buffer helpers ────────────────────────────────────────── */
+
+static bool vk_nk_create_buffers(void) {
+    for (uint32_t i = 0; i < VK_MAX_FRAMES_IN_FLIGHT; i++) {
+        if (!create_buffer(VK_NK_VERTEX_BYTES, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
+                VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                &vk.nk.vbuf[i], &vk.nk.vmem[i]))
+            return false;
+        if (!create_buffer(VK_NK_INDEX_BYTES, VK_BUFFER_USAGE_INDEX_BUFFER_BIT,
+                VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                &vk.nk.ibuf[i], &vk.nk.imem[i]))
+            return false;
+    }
+    return true;
+}
+
+static void vk_nk_destroy_buffers(void) {
+    if (!vk.device) return;
+    for (uint32_t i = 0; i < VK_MAX_FRAMES_IN_FLIGHT; i++) {
+        if (vk.nk.vbuf[i]) { vkDestroyBuffer(vk.device, vk.nk.vbuf[i], NULL); vk.nk.vbuf[i] = VK_NULL_HANDLE; }
+        if (vk.nk.vmem[i]) { vkFreeMemory(vk.device, vk.nk.vmem[i], NULL);    vk.nk.vmem[i] = VK_NULL_HANDLE; }
+        if (vk.nk.ibuf[i]) { vkDestroyBuffer(vk.device, vk.nk.ibuf[i], NULL); vk.nk.ibuf[i] = VK_NULL_HANDLE; }
+        if (vk.nk.imem[i]) { vkFreeMemory(vk.device, vk.nk.imem[i], NULL);    vk.nk.imem[i] = VK_NULL_HANDLE; }
+    }
+}
+
+/* ── NK pipeline (dynamic scissor, alpha blend, mat4 push constant) ─────── */
+
+static bool vk_nk_create_pipeline(void) {
+    if (!create_shader_module(g_nk_vert_spv, g_nk_vert_spv_size, &vk.nk.vert)) return false;
+    if (!create_shader_module(g_nk_frag_spv, g_nk_frag_spv_size, &vk.nk.frag)) return false;
+
+    VkPipelineShaderStageCreateInfo stages[2] = {
+        { .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+          .stage = VK_SHADER_STAGE_VERTEX_BIT,   .module = vk.nk.vert, .pName = "main" },
+        { .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+          .stage = VK_SHADER_STAGE_FRAGMENT_BIT, .module = vk.nk.frag, .pName = "main" },
+    };
+    VkVertexInputBindingDescription binding = {
+        .binding=0, .stride=sizeof(vk_nk_vertex_t), .inputRate=VK_VERTEX_INPUT_RATE_VERTEX };
+    VkVertexInputAttributeDescription attrs[3] = {
+        { .location=0, .binding=0, .format=VK_FORMAT_R32G32_SFLOAT,  .offset=0  }, /* pos */
+        { .location=1, .binding=0, .format=VK_FORMAT_R32G32_SFLOAT,  .offset=8  }, /* uv  */
+        { .location=2, .binding=0, .format=VK_FORMAT_R8G8B8A8_UNORM, .offset=16 }, /* col */
+    };
+    VkPipelineVertexInputStateCreateInfo vi = {
+        .sType=VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO,
+        .vertexBindingDescriptionCount=1, .pVertexBindingDescriptions=&binding,
+        .vertexAttributeDescriptionCount=3, .pVertexAttributeDescriptions=attrs };
+    VkPipelineInputAssemblyStateCreateInfo ia = {
+        .sType=VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO,
+        .topology=VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST };
+    VkViewport vp = { .x=0,.y=0,
+        .width=(float)vk.swapchain_extent.width,.height=(float)vk.swapchain_extent.height,
+        .minDepth=0,.maxDepth=1 };
+    VkRect2D sc = { .offset={0,0},.extent=vk.swapchain_extent };
+    VkPipelineViewportStateCreateInfo vs = {
+        .sType=VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO,
+        .viewportCount=1,.pViewports=&vp,.scissorCount=1,.pScissors=&sc };
+    VkPipelineRasterizationStateCreateInfo rs = {
+        .sType=VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO,
+        .polygonMode=VK_POLYGON_MODE_FILL,.cullMode=VK_CULL_MODE_NONE,
+        .frontFace=VK_FRONT_FACE_CLOCKWISE,.lineWidth=1.0f };
+    VkPipelineMultisampleStateCreateInfo ms = {
+        .sType=VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO,
+        .rasterizationSamples=VK_SAMPLE_COUNT_1_BIT };
+    VkPipelineColorBlendAttachmentState blend = {
+        .blendEnable=VK_TRUE,
+        .srcColorBlendFactor=VK_BLEND_FACTOR_SRC_ALPHA,
+        .dstColorBlendFactor=VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA,.colorBlendOp=VK_BLEND_OP_ADD,
+        .srcAlphaBlendFactor=VK_BLEND_FACTOR_ONE,
+        .dstAlphaBlendFactor=VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA,.alphaBlendOp=VK_BLEND_OP_ADD,
+        .colorWriteMask=VK_COLOR_COMPONENT_R_BIT|VK_COLOR_COMPONENT_G_BIT|
+                        VK_COLOR_COMPONENT_B_BIT|VK_COLOR_COMPONENT_A_BIT };
+    VkPipelineColorBlendStateCreateInfo cbs = {
+        .sType=VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO,
+        .attachmentCount=1,.pAttachments=&blend };
+    VkDynamicState dyn_states[] = { VK_DYNAMIC_STATE_SCISSOR };
+    VkPipelineDynamicStateCreateInfo dyn = {
+        .sType=VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO,
+        .dynamicStateCount=1,.pDynamicStates=dyn_states };
+    VkPushConstantRange pc_range = {
+        .stageFlags=VK_SHADER_STAGE_VERTEX_BIT,.offset=0,.size=64 }; /* mat4 */
+    VkPipelineLayoutCreateInfo layout_ci = {
+        .sType=VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
+        .setLayoutCount=1,.pSetLayouts=&vk.texture_descriptor_layout,
+        .pushConstantRangeCount=1,.pPushConstantRanges=&pc_range };
+    VK_CHECK(vkCreatePipelineLayout(vk.device, &layout_ci, NULL, &vk.nk.layout));
+
+    VkGraphicsPipelineCreateInfo ci = {
+        .sType=VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO,
+        .stageCount=2,.pStages=stages,
+        .pVertexInputState=&vi,.pInputAssemblyState=&ia,
+        .pViewportState=&vs,.pRasterizationState=&rs,
+        .pMultisampleState=&ms,.pColorBlendState=&cbs,
+        .pDynamicState=&dyn,
+        .layout=vk.nk.layout,.renderPass=vk.render_pass,.subpass=0 };
+    VK_CHECK(vkCreateGraphicsPipelines(vk.device, VK_NULL_HANDLE, 1, &ci, NULL, &vk.nk.pipeline));
+    return true;
+}
+
+static void vk_nk_destroy_pipeline(void) {
+    if (!vk.device) return;
+    if (vk.nk.pipeline)     { vkDestroyPipeline(vk.device, vk.nk.pipeline, NULL);       vk.nk.pipeline = VK_NULL_HANDLE; }
+    if (vk.nk.layout)       { vkDestroyPipelineLayout(vk.device, vk.nk.layout, NULL);   vk.nk.layout   = VK_NULL_HANDLE; }
+    if (vk.nk.vert)         { vkDestroyShaderModule(vk.device, vk.nk.vert, NULL);        vk.nk.vert     = VK_NULL_HANDLE; }
+    if (vk.nk.frag)         { vkDestroyShaderModule(vk.device, vk.nk.frag, NULL);        vk.nk.frag     = VK_NULL_HANDLE; }
+}
+
+/* ── NK Vulkan resource init (no NK types) ───────────────────────────────── */
+
+bool engine_vulkan_nk_init_resources(void *win) {
+    if (!vk.initialized || vk.nk.initialized) return vk.nk.initialized;
+    vk.nk.win = (GLFWwindow*)win;
+    if (!vk_nk_create_pipeline()) { fprintf(stderr, "[Vulkan NK] Pipeline failed\n"); return false; }
+    if (!vk_nk_create_buffers())  { fprintf(stderr, "[Vulkan NK] Buffers failed\n");  return false; }
+    glfwSetCharCallback(vk.nk.win, vk_nk_char_cb);
+    vk.nk.initialized = true;
+    fprintf(stderr, "[Vulkan NK] Resources ready\n");
+    return true;
+}
+
+/* Upload font atlas pixels as a Vulkan texture (called from 3rd_nuklear_glfw_vk.h) */
+fwk_backend_texture_t engine_vulkan_nk_upload_font(const void *pixels, int w, int h) {
+    return engine_vulkan_create_texture((unsigned)w, (unsigned)h, 4, pixels, 0);
+}
+
+fwk_backend_texture_t engine_vulkan_nk_white_tex(void) {
+    return engine_vulkan_white_texture();
+}
+
+/* ── Raw Vulkan draw functions (called from 3rd_nuklear_glfw_vk.h callback) ─ */
+
+void *engine_vulkan_nk_map_vbuf(void) {
+    void *p = NULL;
+    vkMapMemory(vk.device, vk.nk.vmem[vk.frame_index], 0, VK_NK_VERTEX_BYTES, 0, &p);
+    return p;
+}
+
+void *engine_vulkan_nk_map_ibuf(void) {
+    void *p = NULL;
+    vkMapMemory(vk.device, vk.nk.imem[vk.frame_index], 0, VK_NK_INDEX_BYTES, 0, &p);
+    return p;
+}
+
+void engine_vulkan_nk_unmap(void) {
+    vkUnmapMemory(vk.device, vk.nk.vmem[vk.frame_index]);
+    vkUnmapMemory(vk.device, vk.nk.imem[vk.frame_index]);
+}
+
+void engine_vulkan_nk_begin_draw(float W, float H) {
+    float proj[4][4] = {
+        { 2.0f/W,    0,  0, 0 },
+        {      0, 2.0f/H,  0, 0 },
+        {      0,    0,  1, 0 },
+        {     -1,   -1,  0, 1 },
+    };
+    VkDeviceSize off = 0;
+    vkCmdBindPipeline(s_nk_cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, vk.nk.pipeline);
+    vkCmdBindVertexBuffers(s_nk_cmd, 0, 1, &vk.nk.vbuf[vk.frame_index], &off);
+    vkCmdBindIndexBuffer(s_nk_cmd, vk.nk.ibuf[vk.frame_index], 0, VK_INDEX_TYPE_UINT16);
+    vkCmdPushConstants(s_nk_cmd, vk.nk.layout, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(proj), proj);
+}
+
+bool engine_vulkan_nk_draw_cmd(uint64_t tex_id,
+                               int32_t cx, int32_t cy, int32_t cw, int32_t ch,
+                               uint32_t elem_count, uint32_t idx_offset) {
+    if (cx < 0) { cw += cx; cx = 0; }
+    if (cy < 0) { ch += cy; cy = 0; }
+    if (cw <= 0 || ch <= 0) return false;
+    VkRect2D scissor = { .offset={cx,cy}, .extent={(uint32_t)cw,(uint32_t)ch} };
+    vkCmdSetScissor(s_nk_cmd, 0, 1, &scissor);
+    vulkan_texture_t *tex = lookup_texture((fwk_backend_texture_t)tex_id);
+    if (!tex || !tex->descriptor_set) return false;
+    vkCmdBindDescriptorSets(s_nk_cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                            vk.nk.layout, 0, 1, &tex->descriptor_set, 0, NULL);
+    vkCmdDrawIndexed(s_nk_cmd, elem_count, 1, idx_offset, 0, 0);
+    return true;
+}
+
+uint32_t engine_vulkan_nk_current_frame(void)  { return vk.frame_index; }
+float    engine_vulkan_nk_viewport_w(void)     { return (float)vk.swapchain_extent.width;  }
+float    engine_vulkan_nk_viewport_h(void)     { return (float)vk.swapchain_extent.height; }
+bool     engine_vulkan_nk_is_ready(void)       { return vk.nk.initialized; }
+int     *engine_vulkan_nk_text_len(void)       { return &vk.nk.text_len; }
+unsigned *engine_vulkan_nk_text_buf(void)      { return vk.nk.text_buf; }
+
 static void cleanup_vulkan_objects(bool wait_idle) {
     GLFWwindow *owned_window = vk.owns_window ? vk.window : NULL;
     bool owned_glfw = vk.owns_glfw;
@@ -1803,6 +2170,12 @@ static void cleanup_vulkan_objects(bool wait_idle) {
         destroy_swapchain_resources();
         vq_destroy_gpu_buffers(&vk.prim);
         vq_destroy_gpu_buffers(&vk.tex);
+        /* Nuklear Vulkan cleanup (NK context freed by 3rd_nuklear_glfw_vk.h shutdown) */
+        if (vk.nk.initialized) {
+            vk_nk_destroy_buffers();
+            vk_nk_destroy_pipeline();
+            vk.nk.initialized = false;
+        }
         destroy_texture_infra();
         free(vk.prim.cpu);
         free(vk.tex.cpu);
@@ -2016,6 +2389,12 @@ bool engine_vulkan_end_frame(void) {
         vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, vk.primitive_pipeline);
         vkCmdBindVertexBuffers(cmd, 0, 1, &vertex_buffer, &offset);
         vkCmdDraw(cmd, primitive_count, 1, 0, 0);
+    }
+    /* Nuklear UI — callback defined in 3rd_nuklear_glfw_vk.h, must be inside render pass */
+    if (s_nk_render_fn && vk.nk.initialized) {
+        s_nk_cmd = cmd;
+        s_nk_render_fn();
+        s_nk_cmd = VK_NULL_HANDLE;
     }
     vkCmdEndRenderPass(cmd);
     cmd_result = vkEndCommandBuffer(cmd);

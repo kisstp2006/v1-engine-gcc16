@@ -404,8 +404,8 @@ static bool window_create_vulkan(float scale, unsigned flags) {
     PRINTF("Monitor: %s (%dHz, backend=Vulkan)\n", glfwGetMonitorName(monitor ? monitor : glfwGetPrimaryMonitor()), mode->refreshRate);
     PRINTF("Window: %dx%d\n", g->width, g->height);
 
-    /* Install scroll callback for Vulkan mode (nk_glfw3_init would do this in GL mode) */
-    { extern void input_enable_vulkan_scroll(void *win); input_enable_vulkan_scroll(window); }
+    /* Install unified engine scroll callback */
+    { extern void input_register_scroll_callback(void *win); input_register_scroll_callback(window); }
 
     /* Wait for the asset cook to finish and reload the VFS.
      * The GL path does this inside framework_post_init() (called from window_create_from_handle).
@@ -424,6 +424,9 @@ static bool window_create_vulkan(float scale, unsigned flags) {
         audio_init(0);
         network_init();
     }
+
+    /* Init Vulkan NK pipeline+buffers; NK context init deferred to first ui_create() */
+    { int engine_vulkan_nk_init_resources(void *win); engine_vulkan_nk_init_resources(window); }
 
     glfwShowWindow(window);
     return true;
@@ -548,6 +551,8 @@ bool window_create_from_handle(void *handle, float scale, unsigned flags) {
 
     // setup nuklear ui
     ui_ctx = nk_glfw3_init(&nk_glfw, window, NK_GLFW3_INSTALL_CALLBACKS);
+    /* Override NK's scroll callback with unified engine one (still forwards to NK internally) */
+    { extern void input_register_scroll_callback(void *win); input_register_scroll_callback(window); }
 
     //glEnable(GL_TEXTURE_2D);
 
@@ -767,6 +772,7 @@ int window_frame_begin() {
     #endif
 
     #if ENABLE_VULKAN
+        /* NK new_frame: nk_glfw_vk_new_frame() called from 3rd_nuklear_glfw_vk.h */
         if( g_render_api && g_render_api->begin_frame && !g_render_api->begin_frame() ) return 0;
         if( g_render_api && g_render_api->clear )
             g_render_api->clear(winbgcolor.r, winbgcolor.g, winbgcolor.b,

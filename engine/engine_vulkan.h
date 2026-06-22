@@ -103,4 +103,34 @@ bool engine_vulkan_poll_events(void);
 int engine_vulkan_width(void);
 int engine_vulkan_height(void);
 
+/* ── Nuklear Vulkan UI (raw Vulkan layer — NK types live in 3rd_nuklear_glfw_vk.h) ── */
+
+/* Create Vulkan NK resources: pipeline, per-frame vertex/index buffers, char cb.
+ * Called from window_create_vulkan after engine_vulkan_init(). */
+bool engine_vulkan_nk_init_resources(void *glfw_window);
+
+/* Register the render callback (called from 3rd_nuklear_glfw_vk.h during init). */
+void engine_vulkan_set_nk_render_fn(void (*fn)(void));
+
+/* Font atlas pixels → Vulkan texture slot (called from 3rd_nuklear_glfw_vk.h). */
+fwk_backend_texture_t engine_vulkan_nk_upload_font(const void *pixels, int w, int h);
+fwk_backend_texture_t engine_vulkan_nk_white_tex(void);
+
+/* Raw Vulkan draw primitives (called from the render callback, inside render pass). */
+void    *engine_vulkan_nk_map_vbuf(void);
+void    *engine_vulkan_nk_map_ibuf(void);
+void     engine_vulkan_nk_unmap(void);
+void     engine_vulkan_nk_begin_draw(float W, float H);
+bool     engine_vulkan_nk_draw_cmd(uint64_t tex_id,
+                                   int32_t cx, int32_t cy, int32_t cw, int32_t ch,
+                                   uint32_t elem_count, uint32_t idx_offset);
+
+/* Accessors used by 3rd_nuklear_glfw_vk.h */
+uint32_t  engine_vulkan_nk_current_frame(void);
+float     engine_vulkan_nk_viewport_w(void);
+float     engine_vulkan_nk_viewport_h(void);
+bool      engine_vulkan_nk_is_ready(void);
+int      *engine_vulkan_nk_text_len(void);
+unsigned *engine_vulkan_nk_text_buf(void);
+
 #endif /* ENGINE_VULKAN_H */

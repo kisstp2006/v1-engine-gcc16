@@ -1382,6 +1382,14 @@ static int ui_using_v2_menubar = 0;
 static struct nk_context *ui_ctx;
 static struct nk_glfw nk_glfw = {0};
 
+void ui_set_context(struct nk_context *ctx) { ui_ctx = ctx; }
+
+#if ENABLE_VULKAN
+#define NK_GLFW_VK_IMPLEMENTATION
+#include "split/3rd_nuklear_glfw_vk.h"
+static struct nk_glfw_vk nk_glfw_vk = {0};
+#endif
+
 void* ui_handle() {
     return ui_ctx;
 }
@@ -2178,8 +2186,19 @@ static
 void ui_create() {
     do_once atexit(ui_destroy);
 
+#if ENABLE_VULKAN
+    if( engine_vulkan_nk_is_ready() && !nk_glfw_vk.win ) {
+        ui_ctx = nk_glfw_vk_init(&nk_glfw_vk, (GLFWwindow*)window_handle());
+    }
+#endif
+
     if( ui_dirty ) {
-        nk_glfw3_new_frame(&nk_glfw); //g->nk_glfw);
+#if ENABLE_VULKAN
+        if( nk_glfw_vk.win )
+            nk_glfw_vk_new_frame(&nk_glfw_vk);
+        else
+#endif
+        nk_glfw3_new_frame(&nk_glfw);
         ui_dirty = 0;
 
         ui_enable();
@@ -11570,9 +11589,18 @@ void input_init() {
     #endif
 }
 
-static double vk_scroll_x = 0, vk_scroll_y = 0;
-static void vk_scroll_cb(GLFWwindow *w, double x, double y) { (void)w; vk_scroll_x += x; vk_scroll_y += y; }
-void input_enable_vulkan_scroll(void *win) { glfwSetScrollCallback((GLFWwindow*)win, vk_scroll_cb); }
+double eng_scroll_x = 0, eng_scroll_y = 0;
+
+static void eng_scroll_cb(GLFWwindow *w, double x, double y) {
+    eng_scroll_x += x;
+    eng_scroll_y += y;
+    struct nk_glfw *nk = (struct nk_glfw*)glfwGetWindowUserPointer(w);
+    if (nk) { nk->scroll.x += (float)x; nk->scroll.y += (float)y; }
+}
+
+void input_register_scroll_callback(void *win) {
+    glfwSetScrollCallback((GLFWwindow*)win, eng_scroll_cb);
+}
 
 static int any_key = 0;
 int input_anykey() {
@@ -11597,14 +11625,8 @@ void input_update() {
     glfwGetCursorPos(win, &mx, &my);
     floats[MOUSE_X] = mx;
     floats[MOUSE_Y] = my;
-    struct nk_glfw* glfw = glfwGetWindowUserPointer(win); // from nuklear, because it is overriding glfwSetScrollCallback()
-    if( glfw ) {
-        floats[MOUSE_W] = mouse_wheel_old + (float)glfw->scroll_bak.x + (float)glfw->scroll_bak.y;
-        glfw->scroll_bak.x = glfw->scroll_bak.y = 0;
-    } else {
-        floats[MOUSE_W] = mouse_wheel_old + (float)vk_scroll_x + (float)vk_scroll_y;
-        vk_scroll_x = vk_scroll_y = 0;
-    }
+    floats[MOUSE_W] = mouse_wheel_old + (float)eng_scroll_x + (float)eng_scroll_y;
+    eng_scroll_x = eng_scroll_y = 0;
 
     // Dear Win32 users,
     // - Touchpad cursor freezing when any key is being pressed?
@@ -30112,8 +30134,7 @@ static bool window_create_vulkan(float scale, unsigned flags) {
     PRINTF("Monitor: %s (%dHz, backend=Vulkan)\n", glfwGetMonitorName(monitor ? monitor : glfwGetPrimaryMonitor()), mode->refreshRate);
     PRINTF("Window: %dx%d\n", g->width, g->height);
 
-    /* Install scroll callback (normally done by nk_glfw3_init in GL mode) */
-    input_enable_vulkan_scroll(window);
+    input_register_scroll_callback(window);
 
     /* Wait for asset cook to finish and mount the cooked zips into the VFS.
      * The GL path does this in framework_post_init(); Vulkan skips that path. */
@@ -30123,6 +30144,9 @@ static bool window_create_vulkan(float scale, unsigned flags) {
     profiler_init();
     audio_init(0);
     network_init();
+
+    engine_vulkan_nk_init_resources(window);
+    /* NK context init deferred to first ui_create() call (ordering safe) */
 
     glfwShowWindow(window);
     return true;
@@ -30247,6 +30271,8 @@ bool window_create_from_handle(void *handle, float scale, unsigned flags) {
 
     // setup nuklear ui
     ui_ctx = nk_glfw3_init(&nk_glfw, window, NK_GLFW3_INSTALL_CALLBACKS);
+    /* Override NK's scroll callback with unified engine one (still forwards to NK) */
+    input_register_scroll_callback(window);
 
     //glEnable(GL_TEXTURE_2D);
 
@@ -30466,6 +30492,7 @@ int window_frame_begin() {
     #endif
 
     #if ENABLE_VULKAN
+        /* NK new_frame: called from 3rd_nuklear_glfw_vk.h via nk_glfw_vk_new_frame() */
         if( g_render_api && g_render_api->begin_frame && !g_render_api->begin_frame() ) return 0;
         if( g_render_api && g_render_api->clear )
             g_render_api->clear(winbgcolor.r, winbgcolor.g, winbgcolor.b,

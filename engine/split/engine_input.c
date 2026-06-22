@@ -194,10 +194,26 @@ void input_init() {
     #endif
 }
 
-/* Vulkan-mode scroll accumulator — used when nk_glfw is not available */
-static double vk_scroll_x = 0, vk_scroll_y = 0;
-static void vk_scroll_cb(GLFWwindow *w, double x, double y) { (void)w; vk_scroll_x += x; vk_scroll_y += y; }
-void input_enable_vulkan_scroll(void *win) { glfwSetScrollCallback((GLFWwindow*)win, vk_scroll_cb); }
+/* Engine-owned scroll accumulator — backend-independent, replaces nk_glfw scroll_bak dependency.
+ * eng_scroll_cb is registered at window creation for BOTH GL and Vulkan paths.
+ * In GL mode it also forwards to nk_glfw->scroll so nk_glfw3_new_frame still works.
+ * input_update reads from here; Nuklear Vulkan begin also reads here before input_update resets. */
+double eng_scroll_x = 0, eng_scroll_y = 0;
+
+static void eng_scroll_cb(GLFWwindow *w, double x, double y) {
+    eng_scroll_x += x;
+    eng_scroll_y += y;
+    /* GL mode: forward to nk_glfw->scroll so nk_glfw3_new_frame receives it */
+    struct nk_glfw *nk = (struct nk_glfw*)glfwGetWindowUserPointer(w);
+    if (nk) { nk->scroll.x += (float)x; nk->scroll.y += (float)y; }
+}
+
+/* Call this after window creation (and after nk_glfw3_init in GL mode) to register
+ * the unified scroll callback. In GL mode it overrides NK's callback but still
+ * forwards to NK internally. */
+void input_register_scroll_callback(void *win) {
+    glfwSetScrollCallback((GLFWwindow*)win, eng_scroll_cb);
+}
 
 static int any_key = 0;
 int input_anykey() {
@@ -222,14 +238,9 @@ void input_update() {
     glfwGetCursorPos(win, &mx, &my);
     floats[MOUSE_X] = mx;
     floats[MOUSE_Y] = my;
-    struct nk_glfw* glfw = glfwGetWindowUserPointer(win); // from nuklear, because it is overriding glfwSetScrollCallback()
-    if( glfw ) {
-        floats[MOUSE_W] = mouse_wheel_old + (float)glfw->scroll_bak.x + (float)glfw->scroll_bak.y;
-        glfw->scroll_bak.x = glfw->scroll_bak.y = 0;
-    } else {
-        floats[MOUSE_W] = mouse_wheel_old + (float)vk_scroll_x + (float)vk_scroll_y;
-        vk_scroll_x = vk_scroll_y = 0;
-    }
+    /* Scroll is now always read from eng_scroll_x/y — independent of Nuklear. */
+    floats[MOUSE_W] = mouse_wheel_old + (float)eng_scroll_x + (float)eng_scroll_y;
+    eng_scroll_x = eng_scroll_y = 0;
 
     // Dear Win32 users,
     // - Touchpad cursor freezing when any key is being pressed?
