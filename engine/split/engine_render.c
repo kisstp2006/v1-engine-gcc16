@@ -953,7 +953,49 @@ vec3 bilinear(image_t in, vec2 uv) { // image_bilinear_pixel() ?
 // -----------------------------------------------------------------------------
 // textures
 
+#if ENABLE_VULKAN
+#define FWK_TEXTURE_BACKEND_VULKAN 0x56554B4Eu
+extern fwk_render_api *g_render_api;
+extern fwk_render_api fwk_vulkan_render_api;
+#endif
+
 unsigned texture_update(texture_t *t, unsigned w, unsigned h, unsigned n, const void *pixels, int flags) {
+#if ENABLE_VULKAN
+    if( g_render_api && g_render_api->create_texture ) {
+        ASSERT( t );
+        ASSERT( n <= 4 );
+
+        if( !t->id || t->userdata != FWK_TEXTURE_BACKEND_VULKAN ) {
+            fwk_backend_texture_t backend_texture =
+                g_render_api->create_texture(w, h, n, pixels, flags);
+            if( !backend_texture ) return 0;
+            t->id = (handle)backend_texture;
+            t->userdata = FWK_TEXTURE_BACKEND_VULKAN;
+        } else if( g_render_api->update_texture &&
+                   !g_render_api->update_texture(t->id, w, h, n, pixels, flags) ) {
+            return 0;
+        }
+
+        t->w = w;
+        t->h = h;
+        t->n = n;
+        t->flags = flags;
+        t->filename = t->filename ? t->filename : "";
+        t->transparent = 0;
+
+        if( t->n == 4 && pixels ) {
+            for( int i = 0; i < w * h; i++ ) {
+                if( ((uint8_t *)pixels)[i * 4 + 3] < 255 ) {
+                    t->transparent = 1;
+                    break;
+                }
+            }
+        }
+
+        return t->id;
+    }
+#endif
+
     if( t && !t->id ) {
         glGenTextures( 1, &t->id );
         return texture_update(t, w, h, n, pixels, flags);
@@ -1065,6 +1107,12 @@ void texture_params(texture_t *t, unsigned flags) {
 
 texture_t texture_create(unsigned w, unsigned h, unsigned n, const void *pixels, int flags) {
     texture_t texture = {0};
+#if ENABLE_VULKAN
+    if( g_render_api && g_render_api->create_texture ) {
+        texture_update( &texture, w, h, n, pixels, flags );
+        return texture;
+    }
+#endif
     glGenTextures( 1, &texture.id );
     texture_update( &texture, w, h, n, pixels, flags );
     return texture;
@@ -1159,7 +1207,16 @@ void texture_destroy( texture_t *t ) {
     }
     if(t->filename && t->filename[0]) FREE(t->filename), t->filename = 0;
     if(t->fbo) fbo_destroy_id(t->fbo), t->fbo = 0;
-    if(t->id) glDeleteTextures(1, &t->id), t->id = 0;
+    if(t->id) {
+#if ENABLE_VULKAN
+        if( t->userdata == FWK_TEXTURE_BACKEND_VULKAN && fwk_vulkan_render_api.destroy_texture ) {
+            fwk_vulkan_render_api.destroy_texture(t->id);
+            t->id = 0;
+            t->userdata = 0;
+        } else
+#endif
+        glDeleteTextures(1, &t->id), t->id = 0;
+    }
     *t = (texture_t){0};
 }
 
@@ -4197,16 +4254,28 @@ int fx_load_from_mem(const char *nameid, const char *content) {
     return postfx_load_from_mem(&fx, nameid, content);
 }
 int fx_load(const char *filemask) {
+#if ENABLE_VULKAN
+    if( g_render_api ) return 0;
+#endif
     do_once if (!fx.vao) postfx_create(&fx, 0);
     return postfx_load(&fx, filemask);
 }
 bool fx_begin() {
+#if ENABLE_VULKAN
+    if( g_render_api ) return false;
+#endif
     return postfx_begin(&fx, window_width(), window_height());
 }
 bool fx_begin_res(int w, int h) {
+#if ENABLE_VULKAN
+    if( g_render_api ) return false;
+#endif
     return postfx_begin(&fx, w, h);
 }
 bool fx_end(unsigned texture_id, unsigned depth_id) {
+#if ENABLE_VULKAN
+    if( g_render_api ) return false;
+#endif
     return postfx_end(&fx, texture_id, depth_id);
 }
 void fx_apply(texture_t color_texture, texture_t depth_texture) {

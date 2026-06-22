@@ -39,8 +39,140 @@ static array(sprite_vertex) sprite_vertices = 0;
 // center_wh << 2 | additive << 1 | projected << 0
 static batch_group_t sprite_group[8] = {0};
 
+static bool sprite_groups_initialized;
+static void sprite_groups_init(void) {
+    if( sprite_groups_initialized ) return;
+    for(int i = 0; i < countof(sprite_group); ++i)
+        map_init(sprite_group[i], less_int, hash_int);
+    sprite_groups_initialized = true;
+}
+
+#if ENABLE_VULKAN
+extern fwk_render_api *g_render_api;
+
+static bool sprite_backend_active(void) {
+    return g_render_api && g_render_api->draw_textured_quad;
+}
+
+static fwk_backend_vertex sprite_backend_vertex_from_point(mat44 mvp, vec3 p, vec2 uv, uint32_t rgba) {
+    float cx = mvp[0] * p.x + mvp[4] * p.y + mvp[ 8] * p.z + mvp[12];
+    float cy = mvp[1] * p.x + mvp[5] * p.y + mvp[ 9] * p.z + mvp[13];
+    float cz = mvp[2] * p.x + mvp[6] * p.y + mvp[10] * p.z + mvp[14];
+    float cw = mvp[3] * p.x + mvp[7] * p.y + mvp[11] * p.z + mvp[15];
+    float invw = cw != 0.0f ? 1.0f / cw : 1.0f;
+    float z = cz * invw;
+
+    return (fwk_backend_vertex) {
+        cx * invw,
+        -(cy * invw),
+        z * 0.5f + 0.5f,
+        uv.x, uv.y,
+        ((rgba >>  0) & 255) / 255.f,
+        ((rgba >>  8) & 255) / 255.f,
+        ((rgba >> 16) & 255) / 255.f,
+        ((rgba >> 24) & 255) / 255.f,
+    };
+}
+
+static void sprite_backend_emit_sprite(mat44 mvp, fwk_backend_texture_t texture, const sprite_static_t *it, bool centered) {
+    float x0 = it->ox - it->cellw/2, x3 = x0 + it->cellw;
+    float y0 = it->oy - it->cellh/2, y3 = y0;
+    float x1 = x0,                   x2 = x3;
+    float y1 = y0 + it->cellh,       y2 = y1;
+
+    vec3 v0 = { it->px + ( x0 * it->cos - y0 * it->sin ), it->py + ( x0 * it->sin + y0 * it->cos ), it->pz };
+    vec3 v1 = { it->px + ( x1 * it->cos - y1 * it->sin ), it->py + ( x1 * it->sin + y1 * it->cos ), it->pz };
+    vec3 v2 = { it->px + ( x2 * it->cos - y2 * it->sin ), it->py + ( x2 * it->sin + y2 * it->cos ), it->pz };
+    vec3 v3 = { it->px + ( x3 * it->cos - y3 * it->sin ), it->py + ( x3 * it->sin + y3 * it->cos ), it->pz };
+
+    vec2 uv0, uv1, uv2, uv3;
+    if( centered ) {
+        float cx = (1.0f / it->ncx) - 1e-9f;
+        float cy = (1.0f / it->ncy) - 1e-9f;
+        int idx = (int)it->frame;
+        int px = idx % it->ncx;
+        int py = idx / it->ncx;
+
+        float ux = px * cx, uy = py * cy;
+        float vx = ux + cx, vy = uy + cy;
+
+        uv0 = vec2(ux, uy);
+        uv1 = vec2(ux, vy);
+        uv2 = vec2(vx, vy);
+        uv3 = vec2(vx, uy);
+    } else {
+        float ux = it->x, vx = ux + it->w;
+        float uy = it->y, vy = uy + it->h;
+
+        uv0 = vec2(ux, uy);
+        uv1 = vec2(ux, vy);
+        uv2 = vec2(vx, vy);
+        uv3 = vec2(vx, uy);
+    }
+
+    fwk_backend_vertex quad[4] = {
+        sprite_backend_vertex_from_point(mvp, v0, uv0, it->rgba),
+        sprite_backend_vertex_from_point(mvp, v1, uv1, it->rgba),
+        sprite_backend_vertex_from_point(mvp, v2, uv2, it->rgba),
+        sprite_backend_vertex_from_point(mvp, v3, uv3, it->rgba),
+    };
+    g_render_api->draw_textured_quad(texture, quad);
+}
+
+static void sprite_backend_render_group(batch_group_t *sprites, float mvp[16], bool centered) {
+    if( map_count(*sprites) <= 0 ) return;
+
+    for each_map_ptr(*sprites, int,texture_id, batch_t,bt) {
+        int count = array_count(bt->sprites);
+        if( !count ) continue;
+
+        fwk_backend_texture_t texture = (fwk_backend_texture_t)(uint32_t)*texture_id;
+        array_foreach_ptr(bt->sprites, sprite_static_t,it ) {
+            sprite_backend_emit_sprite(mvp, texture, it, centered);
+        }
+
+        sprite_count += count;
+        array_clear(bt->sprites);
+        bt->dirty = 0;
+    }
+}
+
+static void sprite_flush_backend(void) {
+    sprite_groups_init();
+    sprite_count = 0;
+
+    if( g_render_api->set_blend )
+        g_render_api->set_blend(true);
+    if( g_render_api->set_depth )
+        g_render_api->set_depth(true, true);
+
+    mat44 mvp3d; multiply44x2(mvp3d, camera_get_active()->proj, camera_get_active()->view);
+    sprite_backend_render_group(&sprite_group[SPRITE_PROJECTED], mvp3d, false);
+    sprite_backend_render_group(&sprite_group[SPRITE_PROJECTED|SPRITE_CENTERED], mvp3d, true);
+    sprite_backend_render_group(&sprite_group[SPRITE_PROJECTED|SPRITE_CENTERED|SPRITE_ADDITIVE], mvp3d, true);
+    sprite_backend_render_group(&sprite_group[SPRITE_PROJECTED|SPRITE_ADDITIVE], mvp3d, false);
+
+    mat44 mvp2d;
+    vec3 pos = camera_get_active()->position;
+    float zoom = absf(pos.z); if(zoom < 0.1f) zoom = 0.1f; zoom = 1.f / (zoom + !zoom);
+    float zdepth_max = window_height();
+    float l = pos.x - window_width()  * zoom / 2;
+    float r = pos.x + window_width()  * zoom / 2;
+    float b = pos.y + window_height() * zoom / 2;
+    float t = pos.y - window_height() * zoom / 2;
+    ortho44(mvp2d, l,r,b,t, -zdepth_max, +zdepth_max);
+
+    sprite_backend_render_group(&sprite_group[0], mvp2d, false);
+    sprite_backend_render_group(&sprite_group[SPRITE_CENTERED], mvp2d, true);
+    sprite_backend_render_group(&sprite_group[SPRITE_CENTERED|SPRITE_ADDITIVE], mvp2d, true);
+    sprite_backend_render_group(&sprite_group[SPRITE_ADDITIVE], mvp2d, false);
+}
+#endif
+
 // rect(x,y,w,h) is [0..1] normalized, pos(xyz,z-index), scale_offset(sx,sy,offx,offy), rotation (degrees), color (rgba)
 void sprite_rect( texture_t t, vec4 rect, vec4 pos, vec4 scale_offset, float tilt_deg, unsigned tint_rgba, unsigned flags) {
+    sprite_groups_init();
+
     float zindex = pos.w;
     float scalex = scale_offset.x;
     float scaley = scale_offset.y;
@@ -90,6 +222,8 @@ void sprite_rect( texture_t t, vec4 rect, vec4 pos, vec4 scale_offset, float til
 }
 
 void sprite_sheet( texture_t texture, float spritesheet[3], float position[3], float rotation, float offset[2], float scale[2], unsigned rgba, unsigned flags) {
+    sprite_groups_init();
+
     flags |= SPRITE_CENTERED;
     ASSERT( flags & SPRITE_CENTERED );
 
@@ -296,14 +430,19 @@ static void sprite_render_meshes_group(batch_group_t* sprites, int alpha_key, in
 }
 
 static void sprite_init() {
-    do_once for(int i = 0; i < countof(sprite_group); ++i) {
-    map_init(sprite_group[i], less_int, hash_int);
-    }
+    sprite_groups_init();
 }
 
 static renderstate_t sprite_rs;
 
 void sprite_flush() {
+#if ENABLE_VULKAN
+    if( sprite_backend_active() ) {
+        sprite_flush_backend();
+        return;
+    }
+#endif
+
     do_once {
         sprite_rs = renderstate();
         sprite_rs.reverse_z = 0;

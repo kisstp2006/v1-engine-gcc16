@@ -17721,7 +17721,49 @@ vec3 bilinear(image_t in, vec2 uv) { // image_bilinear_pixel() ?
 // -----------------------------------------------------------------------------
 // textures
 
+#if ENABLE_VULKAN
+#define FWK_TEXTURE_BACKEND_VULKAN 0x56554B4Eu
+extern fwk_render_api *g_render_api;
+extern fwk_render_api fwk_vulkan_render_api;
+#endif
+
 unsigned texture_update(texture_t *t, unsigned w, unsigned h, unsigned n, const void *pixels, int flags) {
+#if ENABLE_VULKAN
+    if( g_render_api && g_render_api->create_texture ) {
+        ASSERT( t );
+        ASSERT( n <= 4 );
+
+        if( !t->id || t->userdata != FWK_TEXTURE_BACKEND_VULKAN ) {
+            fwk_backend_texture_t backend_texture =
+                g_render_api->create_texture(w, h, n, pixels, flags);
+            if( !backend_texture ) return 0;
+            t->id = (handle)backend_texture;
+            t->userdata = FWK_TEXTURE_BACKEND_VULKAN;
+        } else if( g_render_api->update_texture &&
+                   !g_render_api->update_texture(t->id, w, h, n, pixels, flags) ) {
+            return 0;
+        }
+
+        t->w = w;
+        t->h = h;
+        t->n = n;
+        t->flags = flags;
+        t->filename = t->filename ? t->filename : "";
+        t->transparent = 0;
+
+        if( t->n == 4 && pixels ) {
+            for( int i = 0; i < w * h; i++ ) {
+                if( ((uint8_t *)pixels)[i * 4 + 3] < 255 ) {
+                    t->transparent = 1;
+                    break;
+                }
+            }
+        }
+
+        return t->id;
+    }
+#endif
+
     if( t && !t->id ) {
         glGenTextures( 1, &t->id );
         return texture_update(t, w, h, n, pixels, flags);
@@ -17833,6 +17875,12 @@ void texture_params(texture_t *t, unsigned flags) {
 
 texture_t texture_create(unsigned w, unsigned h, unsigned n, const void *pixels, int flags) {
     texture_t texture = {0};
+#if ENABLE_VULKAN
+    if( g_render_api && g_render_api->create_texture ) {
+        texture_update( &texture, w, h, n, pixels, flags );
+        return texture;
+    }
+#endif
     glGenTextures( 1, &texture.id );
     texture_update( &texture, w, h, n, pixels, flags );
     return texture;
@@ -17927,7 +17975,16 @@ void texture_destroy( texture_t *t ) {
     }
     if(t->filename && t->filename[0]) FREE(t->filename), t->filename = 0;
     if(t->fbo) fbo_destroy_id(t->fbo), t->fbo = 0;
-    if(t->id) glDeleteTextures(1, &t->id), t->id = 0;
+    if(t->id) {
+#if ENABLE_VULKAN
+        if( t->userdata == FWK_TEXTURE_BACKEND_VULKAN && fwk_vulkan_render_api.destroy_texture ) {
+            fwk_vulkan_render_api.destroy_texture(t->id);
+            t->id = 0;
+            t->userdata = 0;
+        } else
+#endif
+        glDeleteTextures(1, &t->id), t->id = 0;
+    }
     *t = (texture_t){0};
 }
 
@@ -20965,16 +21022,28 @@ int fx_load_from_mem(const char *nameid, const char *content) {
     return postfx_load_from_mem(&fx, nameid, content);
 }
 int fx_load(const char *filemask) {
+#if ENABLE_VULKAN
+    if( g_render_api ) return 0;
+#endif
     do_once if (!fx.vao) postfx_create(&fx, 0);
     return postfx_load(&fx, filemask);
 }
 bool fx_begin() {
+#if ENABLE_VULKAN
+    if( g_render_api ) return false;
+#endif
     return postfx_begin(&fx, window_width(), window_height());
 }
 bool fx_begin_res(int w, int h) {
+#if ENABLE_VULKAN
+    if( g_render_api ) return false;
+#endif
     return postfx_begin(&fx, w, h);
 }
 bool fx_end(unsigned texture_id, unsigned depth_id) {
+#if ENABLE_VULKAN
+    if( g_render_api ) return false;
+#endif
     return postfx_end(&fx, texture_id, depth_id);
 }
 void fx_apply(texture_t color_texture, texture_t depth_texture) {
@@ -24049,6 +24118,106 @@ void convert_key_to_color_width(uint64_t key, uint32_t *color, float *width) {
     *width = u.f;
 }
 
+static bool dd_lists_initialized;
+static void ddraw_lists_init(void) {
+    if( dd_lists_initialized ) return;
+    for( int i = 0; i < 2; ++i )
+    for( int j = 0; j < 3; ++j ) map_init(dd_lists[i][j], less_64, hash_64);
+    dd_lists_initialized = true;
+}
+
+#if ENABLE_VULKAN
+extern fwk_render_api *g_render_api;
+
+static bool ddraw_backend_active(void) {
+    return g_render_api && g_render_api->draw_line;
+}
+
+static fwk_backend_vertex ddraw_backend_vertex_from_point(mat44 mvp, vec3 p, uint32_t rgbi) {
+    float cx = mvp[0] * p.x + mvp[4] * p.y + mvp[ 8] * p.z + mvp[12];
+    float cy = mvp[1] * p.x + mvp[5] * p.y + mvp[ 9] * p.z + mvp[13];
+    float cz = mvp[2] * p.x + mvp[6] * p.y + mvp[10] * p.z + mvp[14];
+    float cw = mvp[3] * p.x + mvp[7] * p.y + mvp[11] * p.z + mvp[15];
+    float invw = cw != 0.0f ? 1.0f / cw : 1.0f;
+    float z = cz * invw;
+
+    return (fwk_backend_vertex) {
+        cx * invw,
+        -(cy * invw),
+        z * 0.5f + 0.5f,
+        0, 0,
+        ((rgbi >> 0) & 255) / 255.f,
+        ((rgbi >> 8) & 255) / 255.f,
+        ((rgbi >> 16) & 255) / 255.f,
+        1.0f,
+    };
+}
+
+static void ddraw_backend_emit_line(mat44 mvp, vec3 from, vec3 to, uint32_t rgbi) {
+    fwk_backend_vertex a = ddraw_backend_vertex_from_point(mvp, from, rgbi);
+    fwk_backend_vertex b = ddraw_backend_vertex_from_point(mvp, to, rgbi);
+    g_render_api->draw_line(&a, &b);
+}
+
+static void ddraw_backend_flush_lists(mat44 mvp) {
+    ddraw_lists_init();
+
+    if (g_render_api->set_blend)
+        g_render_api->set_blend(true);
+    if (g_render_api->set_depth)
+        g_render_api->set_depth(!dd_ontop, !dd_ontop);
+
+    for( int i = 0; i < 3; ++i ) { // [0] thin, [1] thick, [2] points
+        for each_map(dd_lists[dd_ontop][i], uint64_t, meta, array(vec3), list) {
+            int count = array_count(list);
+            if(!count) continue;
+
+            unsigned rgbi = 0;
+            convert_key_to_color_width(meta, &rgbi, &dd_line_width);
+
+            if( i < 2 ) {
+                for( int v = 0; v + 1 < count; v += 2 )
+                    ddraw_backend_emit_line(mvp, list[v], list[v + 1], rgbi);
+            } else {
+                float sx = window_width()  > 0 ? 2.0f / window_width()  : 0.002f;
+                float sy = window_height() > 0 ? 2.0f / window_height() : 0.002f;
+                for( int v = 0; v < count; ++v ) {
+                    fwk_backend_vertex c = ddraw_backend_vertex_from_point(mvp, list[v], rgbi);
+                    fwk_backend_vertex a = c, b = c;
+                    a.x -= sx; b.x += sx;
+                    g_render_api->draw_line(&a, &b);
+                    a = c; b = c;
+                    a.y -= sy; b.y += sy;
+                    g_render_api->draw_line(&a, &b);
+                }
+            }
+            array_clear(list);
+        }
+    }
+}
+
+static void ddraw_flush_backend_projview(mat44 proj, mat44 view) {
+    mat44 mvp;
+    multiply44x2(mvp, proj, view);
+    ddraw_backend_flush_lists(mvp);
+
+    if(array_count(dd_text2d)) {
+        for(int i = 0; i < array_count(dd_text2d); ++i) {
+            ddraw_color(dd_text2d[i].col);
+            ddraw_text(dd_text2d[i].pos, dd_text2d[i].sca, dd_text2d[i].str);
+        }
+
+        float mvp2d[16];
+        ortho44(mvp2d, -window_width()/2, window_width()/2, -window_height()/2, window_height()/2, -1, 1);
+        translate44(mvp2d, -window_width()/2, window_height()/2, 0);
+        ddraw_backend_flush_lists(mvp2d);
+        array_resize(dd_text2d, 0);
+    }
+
+    ddraw_color(WHITE);
+}
+#endif
+
 void ddraw_push_2d() {
     float width = window_width();
     float height = window_height();
@@ -24073,6 +24242,13 @@ void ddraw_flush() {
 }
 
 void ddraw_flush_projview(mat44 proj, mat44 view) {
+#if ENABLE_VULKAN
+    if( ddraw_backend_active() ) {
+        ddraw_flush_backend_projview(proj, view);
+        return;
+    }
+#endif
+
     do_once dd_rs = renderstate();
     dd_rs.depth_test_enabled = dd_ontop;
     dd_rs.cull_face_enabled = 0;
@@ -24204,17 +24380,20 @@ void ddraw_color_pop() {
 }
 
 void ddraw_point(vec3 from) {
+    ddraw_lists_init();
     uint64_t key = convert_key_from_color_width(dd_color, dd_line_width);
     array(vec3) *found = map_find_or_add(dd_lists[dd_ontop][2], key, 0);
     array_push(*found, from);
 }
 void ddraw_line_thin(vec3 from, vec3 to) { // thin lines
+    ddraw_lists_init();
     uint64_t key = convert_key_from_color_width(dd_color, dd_line_width);
     array(vec3) *found = map_find_or_add(dd_lists[dd_ontop][0], key, 0);
     array_push(*found, from);
     array_push(*found, to);
 }
 void ddraw_line(vec3 from, vec3 to) { // thick lines
+    ddraw_lists_init();
     uint64_t key = convert_key_from_color_width(dd_color, dd_line_width);
     array(vec3) *found = map_find_or_add(dd_lists[dd_ontop][1], key, 0);
     array_push(*found, from);
@@ -24809,13 +24988,22 @@ void ddraw_position( vec3 position, float radius ) {
 }
 
 void ddraw_init() {
-    do_once {
-    for( int i = 0; i < 2; ++i )
-    for( int j = 0; j < 3; ++j ) map_init(dd_lists[i][j], less_64, hash_64);
+    static bool dd_gl_initialized;
+
+    ddraw_lists_init();
+
+#if ENABLE_VULKAN
+    if( ddraw_backend_active() ) {
+        ddraw_color(WHITE);
+        return;
+    }
+#endif
+
+    if( dd_gl_initialized ) return;
     dd_program = shader(dd_vs,dd_fs,"att_position","fragcolor", NULL);
     dd_u_color = glGetUniformLocation(dd_program, "u_color");
+    dd_gl_initialized = true;
     ddraw_flush(); // alloc vao & vbo, also resets color
-    }
 }
 
 void ddraw_demo() {
@@ -25754,8 +25942,140 @@ static array(sprite_vertex) sprite_vertices = 0;
 // center_wh << 2 | additive << 1 | projected << 0
 static batch_group_t sprite_group[8] = {0};
 
+static bool sprite_groups_initialized;
+static void sprite_groups_init(void) {
+    if( sprite_groups_initialized ) return;
+    for(int i = 0; i < countof(sprite_group); ++i)
+        map_init(sprite_group[i], less_int, hash_int);
+    sprite_groups_initialized = true;
+}
+
+#if ENABLE_VULKAN
+extern fwk_render_api *g_render_api;
+
+static bool sprite_backend_active(void) {
+    return g_render_api && g_render_api->draw_textured_quad;
+}
+
+static fwk_backend_vertex sprite_backend_vertex_from_point(mat44 mvp, vec3 p, vec2 uv, uint32_t rgba) {
+    float cx = mvp[0] * p.x + mvp[4] * p.y + mvp[ 8] * p.z + mvp[12];
+    float cy = mvp[1] * p.x + mvp[5] * p.y + mvp[ 9] * p.z + mvp[13];
+    float cz = mvp[2] * p.x + mvp[6] * p.y + mvp[10] * p.z + mvp[14];
+    float cw = mvp[3] * p.x + mvp[7] * p.y + mvp[11] * p.z + mvp[15];
+    float invw = cw != 0.0f ? 1.0f / cw : 1.0f;
+    float z = cz * invw;
+
+    return (fwk_backend_vertex) {
+        cx * invw,
+        -(cy * invw),
+        z * 0.5f + 0.5f,
+        uv.x, uv.y,
+        ((rgba >>  0) & 255) / 255.f,
+        ((rgba >>  8) & 255) / 255.f,
+        ((rgba >> 16) & 255) / 255.f,
+        ((rgba >> 24) & 255) / 255.f,
+    };
+}
+
+static void sprite_backend_emit_sprite(mat44 mvp, fwk_backend_texture_t texture, const sprite_static_t *it, bool centered) {
+    float x0 = it->ox - it->cellw/2, x3 = x0 + it->cellw;
+    float y0 = it->oy - it->cellh/2, y3 = y0;
+    float x1 = x0,                   x2 = x3;
+    float y1 = y0 + it->cellh,       y2 = y1;
+
+    vec3 v0 = { it->px + ( x0 * it->cos - y0 * it->sin ), it->py + ( x0 * it->sin + y0 * it->cos ), it->pz };
+    vec3 v1 = { it->px + ( x1 * it->cos - y1 * it->sin ), it->py + ( x1 * it->sin + y1 * it->cos ), it->pz };
+    vec3 v2 = { it->px + ( x2 * it->cos - y2 * it->sin ), it->py + ( x2 * it->sin + y2 * it->cos ), it->pz };
+    vec3 v3 = { it->px + ( x3 * it->cos - y3 * it->sin ), it->py + ( x3 * it->sin + y3 * it->cos ), it->pz };
+
+    vec2 uv0, uv1, uv2, uv3;
+    if( centered ) {
+        float cx = (1.0f / it->ncx) - 1e-9f;
+        float cy = (1.0f / it->ncy) - 1e-9f;
+        int idx = (int)it->frame;
+        int px = idx % it->ncx;
+        int py = idx / it->ncx;
+
+        float ux = px * cx, uy = py * cy;
+        float vx = ux + cx, vy = uy + cy;
+
+        uv0 = vec2(ux, uy);
+        uv1 = vec2(ux, vy);
+        uv2 = vec2(vx, vy);
+        uv3 = vec2(vx, uy);
+    } else {
+        float ux = it->x, vx = ux + it->w;
+        float uy = it->y, vy = uy + it->h;
+
+        uv0 = vec2(ux, uy);
+        uv1 = vec2(ux, vy);
+        uv2 = vec2(vx, vy);
+        uv3 = vec2(vx, uy);
+    }
+
+    fwk_backend_vertex quad[4] = {
+        sprite_backend_vertex_from_point(mvp, v0, uv0, it->rgba),
+        sprite_backend_vertex_from_point(mvp, v1, uv1, it->rgba),
+        sprite_backend_vertex_from_point(mvp, v2, uv2, it->rgba),
+        sprite_backend_vertex_from_point(mvp, v3, uv3, it->rgba),
+    };
+    g_render_api->draw_textured_quad(texture, quad);
+}
+
+static void sprite_backend_render_group(batch_group_t *sprites, float mvp[16], bool centered) {
+    if( map_count(*sprites) <= 0 ) return;
+
+    for each_map_ptr(*sprites, int,texture_id, batch_t,bt) {
+        int count = array_count(bt->sprites);
+        if( !count ) continue;
+
+        fwk_backend_texture_t texture = (fwk_backend_texture_t)(uint32_t)*texture_id;
+        array_foreach_ptr(bt->sprites, sprite_static_t,it ) {
+            sprite_backend_emit_sprite(mvp, texture, it, centered);
+        }
+
+        sprite_count += count;
+        array_clear(bt->sprites);
+        bt->dirty = 0;
+    }
+}
+
+static void sprite_flush_backend(void) {
+    sprite_groups_init();
+    sprite_count = 0;
+
+    if( g_render_api->set_blend )
+        g_render_api->set_blend(true);
+    if( g_render_api->set_depth )
+        g_render_api->set_depth(true, true);
+
+    mat44 mvp3d; multiply44x2(mvp3d, camera_get_active()->proj, camera_get_active()->view);
+    sprite_backend_render_group(&sprite_group[SPRITE_PROJECTED], mvp3d, false);
+    sprite_backend_render_group(&sprite_group[SPRITE_PROJECTED|SPRITE_CENTERED], mvp3d, true);
+    sprite_backend_render_group(&sprite_group[SPRITE_PROJECTED|SPRITE_CENTERED|SPRITE_ADDITIVE], mvp3d, true);
+    sprite_backend_render_group(&sprite_group[SPRITE_PROJECTED|SPRITE_ADDITIVE], mvp3d, false);
+
+    mat44 mvp2d;
+    vec3 pos = camera_get_active()->position;
+    float zoom = absf(pos.z); if(zoom < 0.1f) zoom = 0.1f; zoom = 1.f / (zoom + !zoom);
+    float zdepth_max = window_height();
+    float l = pos.x - window_width()  * zoom / 2;
+    float r = pos.x + window_width()  * zoom / 2;
+    float b = pos.y + window_height() * zoom / 2;
+    float t = pos.y - window_height() * zoom / 2;
+    ortho44(mvp2d, l,r,b,t, -zdepth_max, +zdepth_max);
+
+    sprite_backend_render_group(&sprite_group[0], mvp2d, false);
+    sprite_backend_render_group(&sprite_group[SPRITE_CENTERED], mvp2d, true);
+    sprite_backend_render_group(&sprite_group[SPRITE_CENTERED|SPRITE_ADDITIVE], mvp2d, true);
+    sprite_backend_render_group(&sprite_group[SPRITE_ADDITIVE], mvp2d, false);
+}
+#endif
+
 // rect(x,y,w,h) is [0..1] normalized, pos(xyz,z-index), scale_offset(sx,sy,offx,offy), rotation (degrees), color (rgba)
 void sprite_rect( texture_t t, vec4 rect, vec4 pos, vec4 scale_offset, float tilt_deg, unsigned tint_rgba, unsigned flags) {
+    sprite_groups_init();
+
     float zindex = pos.w;
     float scalex = scale_offset.x;
     float scaley = scale_offset.y;
@@ -25805,6 +26125,8 @@ void sprite_rect( texture_t t, vec4 rect, vec4 pos, vec4 scale_offset, float til
 }
 
 void sprite_sheet( texture_t texture, float spritesheet[3], float position[3], float rotation, float offset[2], float scale[2], unsigned rgba, unsigned flags) {
+    sprite_groups_init();
+
     flags |= SPRITE_CENTERED;
     ASSERT( flags & SPRITE_CENTERED );
 
@@ -26011,14 +26333,19 @@ static void sprite_render_meshes_group(batch_group_t* sprites, int alpha_key, in
 }
 
 static void sprite_init() {
-    do_once for(int i = 0; i < countof(sprite_group); ++i) {
-    map_init(sprite_group[i], less_int, hash_int);
-    }
+    sprite_groups_init();
 }
 
 static renderstate_t sprite_rs;
 
 void sprite_flush() {
+#if ENABLE_VULKAN
+    if( sprite_backend_active() ) {
+        sprite_flush_backend();
+        return;
+    }
+#endif
+
     do_once {
         sprite_rs = renderstate();
         sprite_rs.reverse_z = 0;
@@ -29493,10 +29820,8 @@ static vec4 winbgcolor = {0,0,0,1};
 static engine_backend_t window_backend = ENGINE_BACKEND_GL;
 
 #if ENABLE_VULKAN
-extern bool engine_vulkan_init(void *glfw_window, int width, int height);
-extern void engine_vulkan_shutdown(void);
-extern void engine_vulkan_begin_frame(void);
-extern void engine_vulkan_end_frame(void);
+extern fwk_render_api *g_render_api;
+extern fwk_render_api fwk_vulkan_render_api;
 #endif
 
 vec4 window_getcolor_() { return winbgcolor; } // internal
@@ -29752,7 +30077,9 @@ static bool window_create_vulkan(float scale, unsigned flags) {
         xprev = xpos, yprev = ypos;
     }
 
-    if( !engine_vulkan_init(window, w, h) ) {
+    g_render_api = &fwk_vulkan_render_api;
+    if( !g_render_api->init(window, w, h) ) {
+        g_render_api = NULL;
         glfwDestroyWindow(window);
         window = NULL;
         return false;
@@ -29775,6 +30102,12 @@ static bool window_create_vulkan(float scale, unsigned flags) {
     PRINTF("Build version: %s\n", BUILD_VERSION);
     PRINTF("Monitor: %s (%dHz, backend=Vulkan)\n", glfwGetMonitorName(monitor ? monitor : glfwGetPrimaryMonitor()), mode->refreshRate);
     PRINTF("Window: %dx%d\n", g->width, g->height);
+
+    /* Wait for asset cook to finish and mount the cooked zips into the VFS.
+     * The GL path does this in framework_post_init(); Vulkan skips that path. */
+    while (cook_progress() < 100) glfwPollEvents();
+    cook_stop();
+    vfs_reload();
 
     glfwShowWindow(window);
     return true;
@@ -30024,6 +30357,9 @@ bool window_create_from_handle(void *handle, float scale, unsigned flags) {
 #endif
 
     window_backend = ENGINE_BACKEND_GL;
+#if ENABLE_VULKAN
+    g_render_api = NULL;
+#endif
     framework_post_init(mode->refreshRate);
     return true;
 }
@@ -30089,6 +30425,9 @@ int window_frame_begin() {
         if( glfwWindowShouldClose(g->window) ) return 0;
 
         glfwGetFramebufferSize(window, &w, &h);
+#if ENABLE_VULKAN
+        if( g_render_api && g_render_api->resize && !g_render_api->resize(w, h) ) return 0;
+#endif
         g->width = w;
         g->height = h;
 
@@ -30109,7 +30448,10 @@ int window_frame_begin() {
     #endif
 
     #if ENABLE_VULKAN
-        engine_vulkan_begin_frame();
+        if( g_render_api && g_render_api->begin_frame && !g_render_api->begin_frame() ) return 0;
+        if( g_render_api && g_render_api->clear )
+            g_render_api->clear(winbgcolor.r, winbgcolor.g, winbgcolor.b,
+                                window_has_transparent() ? 0 : winbgcolor.a);
     #endif
         return 1;
     }
@@ -30192,7 +30534,16 @@ int window_frame_begin() {
 }
 
 void window_frame_end() {
-    if( window_backend == ENGINE_BACKEND_VULKAN ) return;
+    if( window_backend == ENGINE_BACKEND_VULKAN ) {
+    #if ENABLE_VULKAN
+        sprite_flush();
+        dd_ontop = 0;
+        ddraw_flush();
+        dd_ontop = 1;
+        ddraw_flush();
+    #endif
+        return;
+    }
 
     // flush batching systems that need to be rendered before frame swapping. order matters.
     {
@@ -30231,7 +30582,7 @@ void window_frame_end() {
 void window_frame_swap() {
     if( window_backend == ENGINE_BACKEND_VULKAN ) {
     #if ENABLE_VULKAN
-        engine_vulkan_end_frame();
+        if( g_render_api && g_render_api->end_frame && !g_render_api->end_frame() ) window_destroy();
     #endif
         static int delay_vk = 0; do_once delay_vk = optioni("--delay", 0);
         if( delay_vk ) sleep_ms( delay_vk );
@@ -30268,8 +30619,8 @@ void window_shutdown() {
 
         window_loop_exit(); // finish emscripten loop automatically
 #if ENABLE_VULKAN
-        if( window_backend == ENGINE_BACKEND_VULKAN )
-            engine_vulkan_shutdown();
+        if( window_backend == ENGINE_BACKEND_VULKAN && g_render_api && g_render_api->shutdown )
+            g_render_api->shutdown();
 #endif
         glfwTerminate();
     }
@@ -30278,6 +30629,7 @@ void window_shutdown() {
 int window_swap() {
     if( window_backend == ENGINE_BACKEND_VULKAN ) {
         if( frame_count > 0 ) {
+            window_frame_end();
             window_frame_swap();
         }
 
@@ -30451,6 +30803,11 @@ void window_color(unsigned color) {
     unsigned b = (color >> 16) & 255;
     unsigned a = (color >> 24) & 255;
     winbgcolor = vec4(r / 255.0, g / 255.0, b / 255.0, a / 255.0);
+#if ENABLE_VULKAN
+    if( window_backend == ENGINE_BACKEND_VULKAN && g_render_api && g_render_api->clear )
+        g_render_api->clear(winbgcolor.r, winbgcolor.g, winbgcolor.b,
+                            window && window_has_transparent() ? 0 : winbgcolor.a);
+#endif
 }
 char window_msaa() {
     return msaa;

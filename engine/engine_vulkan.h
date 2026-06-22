@@ -28,20 +28,43 @@ typedef enum engine_backend_t {
 } engine_backend_t;
 #endif
 
-/* ── Render dispatch vtable (shared by GL and Vulkan paths) ─────────────── */
+/* ── Backend dispatch vtable (shared by GL and Vulkan paths) ────────────── */
 /*
- * Each backend fills in this table during init.
- * High-level code calls through the vtable — no #ifdef, no duplicate paths.
+ * Clean backend lifecycle:
+ * init -> begin_frame -> clear -> end_frame -> resize -> shutdown.
  */
-typedef struct fwk_render_api {
+#ifndef FWK_BACKEND_API_DEFINED
+#define FWK_BACKEND_API_DEFINED
+typedef uint64_t fwk_backend_texture_t;
+
+typedef struct fwk_backend_vertex {
+    float x, y, z;
+    float u, v;
+    float r, g, b, a;
+} fwk_backend_vertex;
+
+typedef struct fwk_backend_api {
     const char *name;                           /* "OpenGL" or "Vulkan" */
     bool (*init)(void *glfw_window, int w, int h);
-    void (*shutdown)(void);
-    void (*begin_frame)(void);
-    void (*end_frame)(void);
+    bool (*begin_frame)(void);
     void (*clear)(float r, float g, float b, float a);
-    /* More entries added as Vulkan support expands in Phase 6+ */
-} fwk_render_api;
+    bool (*end_frame)(void);
+    bool (*resize)(int w, int h);
+    fwk_backend_texture_t (*create_texture)(unsigned w, unsigned h, unsigned n, const void *pixels, int flags);
+    bool (*update_texture)(fwk_backend_texture_t texture, unsigned w, unsigned h, unsigned n, const void *pixels, int flags);
+    void (*destroy_texture)(fwk_backend_texture_t texture);
+    void (*set_viewport)(int x, int y, int w, int h);
+    void (*set_blend)(bool enabled);
+    void (*set_depth)(bool test_enabled, bool write_enabled);
+    void (*draw_line)(const fwk_backend_vertex *a, const fwk_backend_vertex *b);
+    void (*draw_triangle)(const fwk_backend_vertex vertices[3]);
+    void (*draw_quad)(const fwk_backend_vertex vertices[4]);
+    void (*draw_textured_quad)(fwk_backend_texture_t texture, const fwk_backend_vertex vertices[4]);
+    void (*shutdown)(void);
+} fwk_backend_api;
+
+typedef fwk_backend_api fwk_render_api;
+#endif
 
 /* Active backend vtable — set by fwk_window_create_standalone_ex() */
 extern fwk_render_api *g_render_api;
@@ -58,9 +81,10 @@ extern fwk_render_api fwk_vulkan_render_api;
  */
 bool engine_vulkan_init(void *glfw_window, int width, int height);
 void engine_vulkan_shutdown(void);
-void engine_vulkan_begin_frame(void);
-void engine_vulkan_end_frame(void);
+bool engine_vulkan_begin_frame(void);
+bool engine_vulkan_end_frame(void);
 void engine_vulkan_clear(float r, float g, float b, float a);
+bool engine_vulkan_resize(int width, int height);
 
 /*
  * Create a GLFW window with GLFW_NO_API (no GL context) and initialise Vulkan.

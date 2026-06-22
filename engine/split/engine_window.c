@@ -121,10 +121,8 @@ static vec4 winbgcolor = {0,0,0,1};
 static engine_backend_t window_backend = ENGINE_BACKEND_GL;
 
 #if ENABLE_VULKAN
-extern bool engine_vulkan_init(void *glfw_window, int width, int height);
-extern void engine_vulkan_shutdown(void);
-extern void engine_vulkan_begin_frame(void);
-extern void engine_vulkan_end_frame(void);
+extern fwk_render_api *g_render_api;
+extern fwk_render_api fwk_vulkan_render_api;
 #endif
 
 vec4 window_getcolor_() { return winbgcolor; } // internal
@@ -380,7 +378,9 @@ static bool window_create_vulkan(float scale, unsigned flags) {
         xprev = xpos, yprev = ypos;
     }
 
-    if( !engine_vulkan_init(window, w, h) ) {
+    g_render_api = &fwk_vulkan_render_api;
+    if( !g_render_api->init(window, w, h) ) {
+        g_render_api = NULL;
         glfwDestroyWindow(window);
         window = NULL;
         return false;
@@ -403,6 +403,18 @@ static bool window_create_vulkan(float scale, unsigned flags) {
     PRINTF("Build version: %s\n", BUILD_VERSION);
     PRINTF("Monitor: %s (%dHz, backend=Vulkan)\n", glfwGetMonitorName(monitor ? monitor : glfwGetPrimaryMonitor()), mode->refreshRate);
     PRINTF("Window: %dx%d\n", g->width, g->height);
+
+    /* Wait for the asset cook to finish and reload the VFS.
+     * The GL path does this inside framework_post_init() (called from window_create_from_handle).
+     * Vulkan skips that path entirely, so we do it here explicitly. */
+    {
+        extern int  cook_progress(void);
+        extern void cook_stop(void);
+        extern void vfs_reload(void);
+        while (cook_progress() < 100) glfwPollEvents();
+        cook_stop();
+        vfs_reload();
+    }
 
     glfwShowWindow(window);
     return true;
@@ -652,6 +664,9 @@ bool window_create_from_handle(void *handle, float scale, unsigned flags) {
 #endif
 
     window_backend = ENGINE_BACKEND_GL;
+#if ENABLE_VULKAN
+    g_render_api = NULL;
+#endif
     framework_post_init(mode->refreshRate);
     return true;
 }
@@ -717,6 +732,9 @@ int window_frame_begin() {
         if( glfwWindowShouldClose(g->window) ) return 0;
 
         glfwGetFramebufferSize(window, &w, &h);
+#if ENABLE_VULKAN
+        if( g_render_api && g_render_api->resize && !g_render_api->resize(w, h) ) return 0;
+#endif
         g->width = w;
         g->height = h;
 
@@ -737,7 +755,10 @@ int window_frame_begin() {
     #endif
 
     #if ENABLE_VULKAN
-        engine_vulkan_begin_frame();
+        if( g_render_api && g_render_api->begin_frame && !g_render_api->begin_frame() ) return 0;
+        if( g_render_api && g_render_api->clear )
+            g_render_api->clear(winbgcolor.r, winbgcolor.g, winbgcolor.b,
+                                window_has_transparent() ? 0 : winbgcolor.a);
     #endif
         return 1;
     }
@@ -820,7 +841,16 @@ int window_frame_begin() {
 }
 
 void window_frame_end() {
-    if( window_backend == ENGINE_BACKEND_VULKAN ) return;
+    if( window_backend == ENGINE_BACKEND_VULKAN ) {
+    #if ENABLE_VULKAN
+        sprite_flush();
+        ddraw_ontop(0);
+        ddraw_flush();
+        ddraw_ontop(1);
+        ddraw_flush();
+    #endif
+        return;
+    }
 
     // flush batching systems that need to be rendered before frame swapping. order matters.
     {
@@ -859,7 +889,7 @@ void window_frame_end() {
 void window_frame_swap() {
     if( window_backend == ENGINE_BACKEND_VULKAN ) {
     #if ENABLE_VULKAN
-        engine_vulkan_end_frame();
+        if( g_render_api && g_render_api->end_frame && !g_render_api->end_frame() ) window_destroy();
     #endif
         static int delay_vk = 0; do_once delay_vk = optioni("--delay", 0);
         if( delay_vk ) sleep_ms( delay_vk );
@@ -896,8 +926,8 @@ void window_shutdown() {
 
         window_loop_exit(); // finish emscripten loop automatically
 #if ENABLE_VULKAN
-        if( window_backend == ENGINE_BACKEND_VULKAN )
-            engine_vulkan_shutdown();
+        if( window_backend == ENGINE_BACKEND_VULKAN && g_render_api && g_render_api->shutdown )
+            g_render_api->shutdown();
 #endif
         glfwTerminate();
     }
@@ -906,6 +936,7 @@ void window_shutdown() {
 int window_swap() {
     if( window_backend == ENGINE_BACKEND_VULKAN ) {
         if( frame_count > 0 ) {
+            window_frame_end();
             window_frame_swap();
         }
 
@@ -1079,6 +1110,11 @@ void window_color(unsigned color) {
     unsigned b = (color >> 16) & 255;
     unsigned a = (color >> 24) & 255;
     winbgcolor = vec4(r / 255.0, g / 255.0, b / 255.0, a / 255.0);
+#if ENABLE_VULKAN
+    if( window_backend == ENGINE_BACKEND_VULKAN && g_render_api && g_render_api->clear )
+        g_render_api->clear(winbgcolor.r, winbgcolor.g, winbgcolor.b,
+                            window && window_has_transparent() ? 0 : winbgcolor.a);
+#endif
 }
 char window_msaa() {
     return msaa;

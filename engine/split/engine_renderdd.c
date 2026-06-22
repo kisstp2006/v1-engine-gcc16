@@ -57,6 +57,106 @@ void convert_key_to_color_width(uint64_t key, uint32_t *color, float *width) {
     *width = u.f;
 }
 
+static bool dd_lists_initialized;
+static void ddraw_lists_init(void) {
+    if( dd_lists_initialized ) return;
+    for( int i = 0; i < 2; ++i )
+    for( int j = 0; j < 3; ++j ) map_init(dd_lists[i][j], less_64, hash_64);
+    dd_lists_initialized = true;
+}
+
+#if ENABLE_VULKAN
+extern fwk_render_api *g_render_api;
+
+static bool ddraw_backend_active(void) {
+    return g_render_api && g_render_api->draw_line;
+}
+
+static fwk_backend_vertex ddraw_backend_vertex_from_point(mat44 mvp, vec3 p, uint32_t rgbi) {
+    float cx = mvp[0] * p.x + mvp[4] * p.y + mvp[ 8] * p.z + mvp[12];
+    float cy = mvp[1] * p.x + mvp[5] * p.y + mvp[ 9] * p.z + mvp[13];
+    float cz = mvp[2] * p.x + mvp[6] * p.y + mvp[10] * p.z + mvp[14];
+    float cw = mvp[3] * p.x + mvp[7] * p.y + mvp[11] * p.z + mvp[15];
+    float invw = cw != 0.0f ? 1.0f / cw : 1.0f;
+    float z = cz * invw;
+
+    return (fwk_backend_vertex) {
+        cx * invw,
+        -(cy * invw),
+        z * 0.5f + 0.5f,
+        0, 0,
+        ((rgbi >> 0) & 255) / 255.f,
+        ((rgbi >> 8) & 255) / 255.f,
+        ((rgbi >> 16) & 255) / 255.f,
+        1.0f,
+    };
+}
+
+static void ddraw_backend_emit_line(mat44 mvp, vec3 from, vec3 to, uint32_t rgbi) {
+    fwk_backend_vertex a = ddraw_backend_vertex_from_point(mvp, from, rgbi);
+    fwk_backend_vertex b = ddraw_backend_vertex_from_point(mvp, to, rgbi);
+    g_render_api->draw_line(&a, &b);
+}
+
+static void ddraw_backend_flush_lists(mat44 mvp) {
+    ddraw_lists_init();
+
+    if (g_render_api->set_blend)
+        g_render_api->set_blend(true);
+    if (g_render_api->set_depth)
+        g_render_api->set_depth(!dd_ontop, !dd_ontop);
+
+    for( int i = 0; i < 3; ++i ) { // [0] thin, [1] thick, [2] points
+        for each_map(dd_lists[dd_ontop][i], uint64_t, meta, array(vec3), list) {
+            int count = array_count(list);
+            if(!count) continue;
+
+            unsigned rgbi = 0;
+            convert_key_to_color_width(meta, &rgbi, &dd_line_width);
+
+            if( i < 2 ) {
+                for( int v = 0; v + 1 < count; v += 2 )
+                    ddraw_backend_emit_line(mvp, list[v], list[v + 1], rgbi);
+            } else {
+                float sx = window_width()  > 0 ? 2.0f / window_width()  : 0.002f;
+                float sy = window_height() > 0 ? 2.0f / window_height() : 0.002f;
+                for( int v = 0; v < count; ++v ) {
+                    fwk_backend_vertex c = ddraw_backend_vertex_from_point(mvp, list[v], rgbi);
+                    fwk_backend_vertex a = c, b = c;
+                    a.x -= sx; b.x += sx;
+                    g_render_api->draw_line(&a, &b);
+                    a = c; b = c;
+                    a.y -= sy; b.y += sy;
+                    g_render_api->draw_line(&a, &b);
+                }
+            }
+            array_clear(list);
+        }
+    }
+}
+
+static void ddraw_flush_backend_projview(mat44 proj, mat44 view) {
+    mat44 mvp;
+    multiply44x2(mvp, proj, view);
+    ddraw_backend_flush_lists(mvp);
+
+    if(array_count(dd_text2d)) {
+        for(int i = 0; i < array_count(dd_text2d); ++i) {
+            ddraw_color(dd_text2d[i].col);
+            ddraw_text(dd_text2d[i].pos, dd_text2d[i].sca, dd_text2d[i].str);
+        }
+
+        float mvp2d[16];
+        ortho44(mvp2d, -window_width()/2, window_width()/2, -window_height()/2, window_height()/2, -1, 1);
+        translate44(mvp2d, -window_width()/2, window_height()/2, 0);
+        ddraw_backend_flush_lists(mvp2d);
+        array_resize(dd_text2d, 0);
+    }
+
+    ddraw_color(WHITE);
+}
+#endif
+
 void ddraw_push_2d() {
     float width = window_width();
     float height = window_height();
@@ -81,6 +181,13 @@ void ddraw_flush() {
 }
 
 void ddraw_flush_projview(mat44 proj, mat44 view) {
+#if ENABLE_VULKAN
+    if( ddraw_backend_active() ) {
+        ddraw_flush_backend_projview(proj, view);
+        return;
+    }
+#endif
+
     do_once dd_rs = renderstate();
     dd_rs.depth_test_enabled = dd_ontop;
     dd_rs.cull_face_enabled = 0;
@@ -212,17 +319,20 @@ void ddraw_color_pop() {
 }
 
 void ddraw_point(vec3 from) {
+    ddraw_lists_init();
     uint64_t key = convert_key_from_color_width(dd_color, dd_line_width);
     array(vec3) *found = map_find_or_add(dd_lists[dd_ontop][2], key, 0);
     array_push(*found, from);
 }
 void ddraw_line_thin(vec3 from, vec3 to) { // thin lines
+    ddraw_lists_init();
     uint64_t key = convert_key_from_color_width(dd_color, dd_line_width);
     array(vec3) *found = map_find_or_add(dd_lists[dd_ontop][0], key, 0);
     array_push(*found, from);
     array_push(*found, to);
 }
 void ddraw_line(vec3 from, vec3 to) { // thick lines
+    ddraw_lists_init();
     uint64_t key = convert_key_from_color_width(dd_color, dd_line_width);
     array(vec3) *found = map_find_or_add(dd_lists[dd_ontop][1], key, 0);
     array_push(*found, from);
@@ -817,13 +927,22 @@ void ddraw_position( vec3 position, float radius ) {
 }
 
 void ddraw_init() {
-    do_once {
-    for( int i = 0; i < 2; ++i )
-    for( int j = 0; j < 3; ++j ) map_init(dd_lists[i][j], less_64, hash_64);
+    static bool dd_gl_initialized;
+
+    ddraw_lists_init();
+
+#if ENABLE_VULKAN
+    if( ddraw_backend_active() ) {
+        ddraw_color(WHITE);
+        return;
+    }
+#endif
+
+    if( dd_gl_initialized ) return;
     dd_program = shader(dd_vs,dd_fs,"att_position","fragcolor", NULL);
     dd_u_color = glGetUniformLocation(dd_program, "u_color");
+    dd_gl_initialized = true;
     ddraw_flush(); // alloc vao & vbo, also resets color
-    }
 }
 
 void ddraw_demo() {

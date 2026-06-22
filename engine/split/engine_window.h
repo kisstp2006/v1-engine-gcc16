@@ -32,6 +32,44 @@ typedef enum engine_backend_t {
 } engine_backend_t;
 #endif
 
+#ifndef FWK_BACKEND_API_DEFINED
+#define FWK_BACKEND_API_DEFINED
+typedef uint64_t fwk_backend_texture_t;
+
+typedef struct fwk_backend_vertex {
+    float x, y, z;
+    float u, v;
+    float r, g, b, a;
+} fwk_backend_vertex;
+
+typedef struct fwk_backend_api {
+    const char *name;
+    bool (*init)(void *glfw_window, int w, int h);
+    bool (*begin_frame)(void);
+    void (*clear)(float r, float g, float b, float a);
+    bool (*end_frame)(void);
+    bool (*resize)(int w, int h);
+    fwk_backend_texture_t (*create_texture)(unsigned w, unsigned h, unsigned n, const void *pixels, int flags);
+    bool (*update_texture)(fwk_backend_texture_t texture, unsigned w, unsigned h, unsigned n, const void *pixels, int flags);
+    void (*destroy_texture)(fwk_backend_texture_t texture);
+    void (*set_viewport)(int x, int y, int w, int h);
+    void (*set_blend)(bool enabled);
+    void (*set_depth)(bool test_enabled, bool write_enabled);
+    void (*draw_line)(const fwk_backend_vertex *a, const fwk_backend_vertex *b);
+    void (*draw_triangle)(const fwk_backend_vertex vertices[3]);
+    void (*draw_quad)(const fwk_backend_vertex vertices[4]);
+    void (*draw_textured_quad)(fwk_backend_texture_t texture, const fwk_backend_vertex vertices[4]);
+    void (*shutdown)(void);
+} fwk_backend_api;
+
+typedef fwk_backend_api fwk_render_api;
+#endif
+
+#if ENABLE_VULKAN
+extern fwk_render_api *g_render_api;
+extern fwk_render_api fwk_vulkan_render_api;
+#endif
+
 API bool     window_create(float scale, unsigned flags);
 API bool     window_create_ex(float scale, unsigned flags, engine_backend_t backend);
 API bool     window_create_from_handle(void *handle, float scale, unsigned flags);
