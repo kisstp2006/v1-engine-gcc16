@@ -55,28 +55,26 @@ static bool sprite_backend_active(void) {
 }
 
 static fwk_backend_vertex sprite_backend_vertex_from_point(mat44 mvp, vec3 p, vec2 uv, uint32_t rgba) {
+    /* Vulkan path: MVP applied in vertex shader (GPU-side push constant).
+     * Snap to integer pixels so LINEAR filter samples near texel centres (sharp pixel art). */
+    if (sprite_backend_active()) {
+        return (fwk_backend_vertex) {
+            roundf(p.x), roundf(p.y), p.z,
+            uv.x, uv.y,
+            ((rgba >>  0) & 255) / 255.f,
+            ((rgba >>  8) & 255) / 255.f,
+            ((rgba >> 16) & 255) / 255.f,
+            ((rgba >> 24) & 255) / 255.f,
+        };
+    }
+    /* GL path: CPU MVP transform, result goes straight to gl_Position in shader */
     float cx = mvp[0] * p.x + mvp[4] * p.y + mvp[ 8] * p.z + mvp[12];
     float cy = mvp[1] * p.x + mvp[5] * p.y + mvp[ 9] * p.z + mvp[13];
     float cz = mvp[2] * p.x + mvp[6] * p.y + mvp[10] * p.z + mvp[14];
     float cw = mvp[3] * p.x + mvp[7] * p.y + mvp[11] * p.z + mvp[15];
     float invw = cw != 0.0f ? 1.0f / cw : 1.0f;
-    float z = cz * invw;
-
-    /* Pixel-snap NDC positions to avoid sub-pixel UV drift that causes blur on pixel-art sprites.
-     * Snaps to the nearest half-texel boundary in screen space (matches GL's hardware behavior). */
-    extern int window_width(void);
-    extern int window_height(void);
-    float ndx = cx * invw;
-    float ndy = -(cy * invw);
-    float half_px_x = 1.0f / (float)window_width();
-    float half_px_y = 1.0f / (float)window_height();
-    ndx = floorf(ndx / half_px_x + 0.5f) * half_px_x;
-    ndy = floorf(ndy / half_px_y + 0.5f) * half_px_y;
-
     return (fwk_backend_vertex) {
-        ndx,
-        ndy,
-        z * 0.5f + 0.5f,
+        cx * invw, cy * invw, cz * invw,
         uv.x, uv.y,
         ((rgba >>  0) & 255) / 255.f,
         ((rgba >>  8) & 255) / 255.f,
@@ -86,6 +84,10 @@ static fwk_backend_vertex sprite_backend_vertex_from_point(mat44 mvp, vec3 p, ve
 }
 
 static void sprite_backend_emit_sprite(mat44 mvp, fwk_backend_texture_t texture, const sprite_static_t *it, bool centered) {
+    /* Tell Vulkan backend the current MVP so it can push it per batch to the vertex shader */
+    if (g_render_api && g_render_api->set_transform)
+        g_render_api->set_transform(mvp);
+
     float x0 = it->ox - it->cellw/2, x3 = x0 + it->cellw;
     float y0 = it->oy - it->cellh/2, y3 = y0;
     float x1 = x0,                   x2 = x3;

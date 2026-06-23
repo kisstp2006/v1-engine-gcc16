@@ -56,6 +56,7 @@ typedef struct fwk_backend_api {
     void (*set_viewport)(int x, int y, int w, int h);
     void (*set_blend)(bool enabled);
     void (*set_depth)(bool test_enabled, bool write_enabled);
+    void (*set_transform)(const float mvp[16]);  /* MVP mat4 for GPU-side sprite transform */
     void (*draw_line)(const fwk_backend_vertex *a, const fwk_backend_vertex *b);
     void (*draw_triangle)(const fwk_backend_vertex vertices[3]);
     void (*draw_quad)(const fwk_backend_vertex vertices[4]);
